@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.QGayze.QG</id>
+  <name>QG</name>
+  <summary>Video Explorer for Linux</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.qgayze">
+    <name>QGayze</name>
+  </developer>
+  <description>
+    <p>QG is a native Linux video file explorer: browse the real filesystem,
+    search for videos fast, play them in place, and keep light organization
+    state — without importing anything into a proprietary library.</p>
+    <p>The filesystem is the source of truth. Folders are folders, files are
+    files; QG overlays thumbnails, duration, watched and favorite state on top
+    of real paths.</p>
+  </description>
+  <launchable type="desktop-id">io.github.QGayze.QG.desktop</launchable>
+  <url type="homepage">https://github.com/QGayze/QG</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-09"/>
+  </releases>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Player</category>
+    <category>Video</category>
+  </categories>
+  <keywords>
+    <keyword>video</keyword>
+    <keyword>movie</keyword>
+    <keyword>player</keyword>
+    <keyword>explorer</keyword>
+  </keywords>
+  <provides>
+    <mediatype>video/mp4</mediatype>
+    <mediatype>video/x-matroska</mediatype>
+    <mediatype>video/webm</mediatype>
+    <mediatype>video/quicktime</mediatype>
+    <mediatype>video/x-msvideo</mediatype>
+    <mediatype>video/mpeg</mediatype>
+    <mediatype>video/mp2t</mediatype>
+  </provides>
+</component>

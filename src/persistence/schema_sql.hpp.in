@@ -1,0 +1,11 @@
+#pragma once
+
+// Generated from src/persistence/schema.sql at configure time. Do not edit.
+// The delimiter is unlikely to appear in SQL content.
+
+namespace qg::persistence {
+
+inline constexpr const char *kSchemaSql = R"QGSQL(
+@QG_SCHEMA_SQL@)QGSQL";
+
+} // namespace qg::persistence

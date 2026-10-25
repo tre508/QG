@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- QG monoline app icon: filmstrip/play mark. Uses currentColor for theme
+       integration; neon signal-blue accent stroke. -->
+  <g fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="32" y="56" width="192" height="144" rx="18"/>
+    <path d="M48 56 L112 128 L48 200" transform="translate(0 0)"/>
+    <path d="M112 128 L208 128"/>
+    <path d="M32 96 H48 M32 160 H48 M208 96 H224 M208 160 H224"/>
+    <rect x="112" y="128" width="0" height="0"/>
+  </g>
+  <circle cx="192" cy="56" r="14" fill="#4DA3FF"/>
+  <circle cx="64" cy="200" r="14" fill="#38E1E1"/>
+  <text x="128" y="232" text-anchor="middle" font-family="Ubuntu, sans-serif" font-size="28"
+        font-weight="bold" fill="currentColor">QG</text>
+</svg>

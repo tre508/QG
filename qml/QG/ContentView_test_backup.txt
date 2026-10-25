@@ -1,0 +1,324 @@
+import QtQuick
+import QtQuick.Controls
+import qg
+
+// Content surface grid host (DESIGN.md §3.4, §3.5, §5.4, §5.5).
+//
+// A virtualized presentation over the canonical model with three densities:
+// Gallery/Standard use a GridView of folder/video cards; Compact uses a ListView
+// of CompactRow. Responsive columns, a keyboard focus cursor (cyan, inset)
+// independent of selection (signal), and scroll management. Presentation only.
+
+Item {
+    id: contentView
+
+    objectName: "contentView"
+    property var model: null
+
+    enum Density { Gallery, Standard, Compact }
+    property int density: ContentView.Standard
+
+    property int focusIndex: -1
+    property int selectedIndex: -1
+
+    readonly property bool compact: density === ContentView.Compact
+    readonly property int itemCount: compact ? compactList.count
+                                    : (manifest ? manifestList.count : grid.count)
+
+    // Manifest mode (Prompt 43/45): search results presentation via ListView
+    property bool manifest: false
+    property string searchQuery: ""
+    property var searchProxy: null  // SearchProxy instance for matching
+    property string summaryText: ""
+
+    // Scroll/selection preservation across manifest toggle
+    property real savedGridViewY: 0
+    property int savedSelectedIndex: -1
+
+    function enterManifest(proxy, query) {
+        savedGridViewY = grid.visible ? grid.contentY : compactList.contentY
+        savedSelectedIndex = selectedIndex
+        searchProxy = proxy
+        searchQuery = query
+        manifest = true
+        selectedIndex = -1
+        focusIndex = 0
+    }
+
+    function exitManifest() {
+        manifest = false
+        searchProxy = null
+        searchQuery = ""
+        selectedIndex = savedSelectedIndex
+        focusIndex = savedSelectedIndex >= 0 ? savedSelectedIndex : 0
+        // Restore scroll position
+        if (grid.visible) grid.contentY = savedGridViewY
+        else compactList.contentY = savedGridViewY
+    }
+
+    // Column/card geometry (DESIGN.md §3.5). Gallery uses larger cards.
+    readonly property int pad: 24
+    readonly property int gap: 16
+    readonly property int minCard: density === ContentView.Gallery ? 240 : 168
+    readonly property int maxCard: density === ContentView.Gallery ? 360 : 320
+    readonly property int columns: Math.max(1, Math.floor((width - 2 * pad) / (minCard + gap)))
+    readonly property int cardWidth: {
+        const cols = columns
+        const avail = width - 2 * pad - (cols - 1) * gap
+        return Math.max(minCard, Math.min(maxCard, Math.floor(avail / cols)))
+    }
+    readonly property int thumbHeight: Math.round(cardWidth * 9 / 16)
+    readonly property int cellHeight: thumbHeight + 44
+
+    signal activated(int index)
+    signal activatedItem(int index, string path, bool isFolder)
+    signal selectionChanged(int index)
+
+    function pathForIndex(index) {
+        return (model && model.pathAt) ? model.pathAt(index) : ""
+    }
+    function isFolderForIndex(index) {
+        return (model && model.isFolderAt) ? model.isFolderAt(index) : false
+    }
+
+    function clampFocus() {
+        if (itemCount <= 0) {
+            focusIndex = -1
+            selectedIndex = -1
+            return
+        }
+        if (focusIndex < 0)
+            focusIndex = 0
+        focusIndex = Math.min(focusIndex, itemCount - 1)
+        if (selectedIndex > itemCount - 1)
+            selectedIndex = itemCount - 1
+    }
+    onItemCountChanged: clampFocus()
+
+    function activateIndex(index) {
+        if (index < 0 || index >= itemCount)
+            return
+        focusIndex = index
+        activated(index)
+        activatedItem(index, pathForIndex(index), isFolderForIndex(index))
+    }
+    function moveFocus(delta) {
+        if (focusIndex < 0 || itemCount <= 0)
+            return
+        focusIndex = Math.max(0, Math.min(itemCount - 1, focusIndex + delta))
+    }
+    function selectIndex(index) {
+        focusIndex = index
+        selectedIndex = index
+        selectionChanged(index)
+    }
+
+    function handleKey(event) {
+        switch (event.key) {
+        case Qt.Key_Left: moveFocus(-1); event.accepted = true; break
+        case Qt.Key_Right: moveFocus(1); event.accepted = true; break
+        case Qt.Key_Up: moveFocus(-(compact ? 1 : columns)); event.accepted = true; break
+        case Qt.Key_Down: moveFocus(compact ? 1 : columns); event.accepted = true; break
+        case Qt.Key_Home: focusIndex = 0; event.accepted = true; break
+        case Qt.Key_End: focusIndex = itemCount - 1; event.accepted = true; break
+        case Qt.Key_Return:
+        case Qt.Key_Enter: activateIndex(focusIndex); event.accepted = true; break
+        default: break
+        }
+    }
+
+    // --- Grid densities (Gallery / Standard) --------------------------------
+    GridView {
+        id: grid
+        objectName: "contentGrid"
+        anchors.fill: parent
+        anchors.topMargin: contentView.pad
+        anchors.bottomMargin: contentView.pad
+        leftMargin: Math.max(contentView.pad,
+                             (contentView.width
+                              - (contentView.columns * contentView.cardWidth
+                                 + (contentView.columns - 1) * contentView.gap)) / 2)
+        rightMargin: leftMargin
+        cellWidth: contentView.cardWidth + contentView.gap
+        cellHeight: contentView.cellHeight + contentView.gap
+        cacheBuffer: 400
+        clip: true
+        visible: !contentView.compact && !contentView.manifest
+        model: contentView.model
+        focus: !contentView.compact && !contentView.manifest
+
+        delegate: DelegateChooser {
+            role: "isFolder"
+
+            DelegateChoice {
+                roleValue: false
+                VideoCard {
+                    objectName: "contentCell"
+                    width: contentView.cardWidth
+                    height: contentView.cellHeight
+                    fileName: model.name
+                    durationMs: model.duration === undefined ? -1 : model.duration
+                    sizeBytes: model.size === undefined ? 0 : model.size
+                    mtimeNs: model.mtime === undefined ? 0 : model.mtime
+                    favorite: model.favorite === true
+                    watched: model.watched === true
+                    progress: model.progress === undefined ? -1 : model.progress
+                    thumbnailState: model.thumbnailState === undefined ? 0 : model.thumbnailState
+                    thumbnail: model.thumbnail === undefined ? null : model.thumbnail
+                    widthPx: model.width === undefined ? 0 : model.width
+                    heightPx: model.height === undefined ? 0 : model.height
+                    detailedMeta: contentView.density !== ContentView.Gallery
+                    focused: index === contentView.focusIndex
+                    selected: index === contentView.selectedIndex
+                    onClicked: contentView.selectIndex(index)
+                    onDoubleClicked: contentView.activateIndex(index)
+                }
+            }
+
+            DelegateChoice {
+                roleValue: true
+                FolderCard {
+                    objectName: "contentCell"
+                    width: contentView.cardWidth
+                    height: contentView.cellHeight
+                    folderName: model.name
+                    videoCount: model.videoCount === undefined ? 0 : model.videoCount
+                    folderCount: model.folderCount === undefined ? 0 : model.folderCount
+                    mosaicSources: model.mosaic === undefined ? [] : model.mosaic
+                    focused: index === contentView.focusIndex
+                    selected: index === contentView.selectedIndex
+                    onClicked: contentView.selectIndex(index)
+                    onDoubleClicked: contentView.activateIndex(index)
+                }
+            }
+        }
+
+        Keys.onPressed: function (event) { contentView.handleKey(event) }
+    }
+
+    // --- Compact density ----------------------------------------------------
+    ListView {
+        id: compactList
+        objectName: "compactList"
+        anchors.fill: parent
+        anchors.topMargin: contentView.pad
+        anchors.bottomMargin: contentView.pad
+        cacheBuffer: 400
+        clip: true
+        visible: contentView.compact && !contentView.manifest
+        model: contentView.model
+        focus: contentView.compact && !contentView.manifest
+
+        delegate: CompactRow {
+            objectName: "contentCell"
+            width: compactList.width
+            fileName: model.name
+            isFolder: model.isFolder === true
+            durationMs: model.duration === undefined ? -1 : model.duration
+            sizeBytes: model.size === undefined ? 0 : model.size
+            mtimeNs: model.mtime === undefined ? 0 : model.mtime
+            videoCount: model.videoCount === undefined ? 0 : model.videoCount
+            folderCount: model.folderCount === undefined ? 0 : model.folderCount
+            favorite: model.favorite === true
+            watched: model.watched === true
+            playing: model.playing === true
+            thumbnailState: model.thumbnailState === undefined ? 0 : model.thumbnailState
+            focused: index === contentView.focusIndex
+            selected: index === contentView.selectedIndex
+            onClicked: contentView.selectIndex(index)
+            onDoubleClicked: contentView.activateIndex(index)
+        }
+
+        Keys.onPressed: function (event) { contentView.handleKey(event) }
+    }
+
+    // --- Manifest density (Prompt 43/45) — search results ListView + header
+    Item {
+        anchors.fill: parent
+        visible: contentView.manifest
+
+        // Sortable header row (synchronized with Order menu)
+        Rectangle {
+            id: manifestHeader
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 28
+            color: Theme.surface2
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: Theme.space3
+                anchors.rightMargin: Theme.space3
+                spacing: Theme.space3
+
+                Item { Layout.preferredWidth: 96 } // thumb placeholder
+                Item { Layout.fillWidth: true }     // name flex
+                Text { text: "Duration"; color: Theme.textLow; font.pixelSize: Theme.fontMicro; Layout.preferredWidth: 72; horizontalAlignment: Text.AlignRight }
+                Text { text: "Size"; color: Theme.textLow; font.pixelSize: Theme.fontMicro; Layout.preferredWidth: 88; horizontalAlignment: Text.AlignRight }
+                Text { text: "Modified"; color: Theme.textLow; font.pixelSize: Theme.fontMicro; Layout.preferredWidth: 120; horizontalAlignment: Text.AlignRight }
+                Item { Layout.preferredWidth: 56 }
+                Item { Layout.preferredWidth: 32 }
+            }
+        }
+
+        // Manifest ListView with ManifestRow delegates
+        ListView {
+            id: manifestList
+            anchors.top: manifestHeader.bottom
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            clip: true
+            model: contentView.searchProxy
+            focus: contentView.manifest
+
+            delegate: ManifestRow {
+                objectName: "manifestCell"
+                width: manifestList.width
+                fileName: model.name !== undefined ? model.name : ""
+                filePath: model.path !== undefined ? model.path : ""
+                durationMs: model.duration !== undefined ? model.duration : -1
+                sizeBytes: model.size !== undefined ? model.size : 0
+                mtimeNs: model.mtime !== undefined ? model.mtime : 0
+                isFolder: model.isFolder === true
+                favorite: model.favorite === true
+                watched: model.watched === true
+                widthPx: model.width !== undefined ? model.width : 0
+                heightPx: model.height !== undefined ? model.height : 0
+                thumbnail: model.thumbnail !== undefined ? model.thumbnail : null
+                thumbnailState: model.thumbnailState !== undefined ? model.thumbnailState : 0
+                focused: index === contentView.focusIndex
+                selected: index === contentView.selectedIndex
+                onClicked: contentView.selectIndex(index)
+                onDoubleClicked: contentView.activateIndex(index)
+            }
+        }
+
+        // No-results overlay (Prompt 44)
+        NoResults {
+            id: noResultsOverlay
+            anchors.fill: parent
+            visible: contentView.manifest && manifestList.count === 0 && contentView.searchQuery.length > 0
+            query: contentView.searchQuery
+            onClearRequested: contentView.exitManifest()
+        }
+
+        // Result summary bar
+        Rectangle {
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 24
+            color: Theme.surface1
+            visible: contentView.summaryText.length > 0
+
+            Text {
+                anchors.centerIn: parent
+                text: contentView.summaryText
+                color: Theme.textMid
+                font.pixelSize: Theme.fontMicro
+            }
+        }
+    }
+}

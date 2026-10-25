@@ -1,0 +1,131 @@
+#pragma once
+#include <QObject>
+#include <QPointer>
+#include <QString>
+#include <QVariant>
+#include <functional>
+#include <memory>
+
+#include "playback_session.hpp"
+#include "mpv_backend.hpp"
+
+class MpvBackend;
+class VideoSurfaceItem;
+class QTimer;
+
+// PlaybackManager: singleton enforcing one-player policy (DESIGN.md §19.1, §19.4).
+// Owns the single PlaybackSession. All playback commands route through here.
+
+class PlaybackManager : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(PlaybackSession *session READ session NOTIFY sessionChanged)
+
+public:
+    static PlaybackManager *instance();
+
+    PlaybackSession *session() const;
+
+    Q_INVOKABLE void open(const QString &path, double startPosition = -1);
+    Q_INVOKABLE void openWithIdentity(const QString &path, const QString &identity,
+                                      double startPosition = -1);
+    Q_INVOKABLE void play();
+    Q_INVOKABLE void pause();
+    Q_INVOKABLE void togglePlayPause();
+    Q_INVOKABLE void stop();
+    Q_INVOKABLE void seek(double seconds);
+    Q_INVOKABLE void seekAbsolute(double position);
+    Q_INVOKABLE void setVolume(double volume);
+    Q_INVOKABLE void setMuted(bool muted);
+    Q_INVOKABLE void close();
+
+    void setBackend(MpvBackend *backend);
+    Q_INVOKABLE void attachSurface(VideoSurfaceItem *surface);
+    // The single mpv backend, exposed so the QML VideoSurfaceItem can bind to it.
+    Q_PROPERTY(MpvBackend *backend READ backend NOTIFY backendChanged)
+    MpvBackend *backend() const { return backend_; }
+    // Persisted position. `persistPosition()` is the throttled periodic write
+    // (at most every 5s); `flushPosition()` is the final write on
+    // pause/stop/close/media change (DESIGN.md §19.6).
+    Q_INVOKABLE void persistPosition();
+    Q_INVOKABLE void flushPosition();
+
+    // Live position as mpv reports it (seconds); the session value when unknown.
+    // Used to restore the real position after a rejected seek (§3.1).
+    double actualPosition() const;
+
+    // Resume policy (DESIGN.md §19.6): Always(=0, default) / Ask(=1) / Never(=2).
+    Q_PROPERTY(int resumePolicy READ resumePolicy WRITE setResumePolicy)
+    Q_INVOKABLE int resumePolicy() const;
+    Q_INVOKABLE void setResumePolicy(int policy);
+
+    // Stored position for an identity, in seconds (0 when none). Read through an
+    // injected loader so playback does not depend on the persistence layer.
+    Q_INVOKABLE double persistedPositionFor(const QString &identity) const;
+    // Injected by the composition root (StateController/Database-backed).
+    void setPositionLoader(std::function<qint64(const QString &identity)> loader);
+
+    // Apply the resume policy + eligibility (DESIGN.md §19.6): resume when the
+    // stored position is > 5s and < duration − 10s. Returns the seconds to start
+    // at (0 = from the beginning). Ask emits resumePromptRequested() and holds at
+    // 0 until the answer arrives via applyResume().
+    double resumeStartFor(const QString &identity, double durationSeconds, bool watched);
+    // Honour an accepted Ask prompt: seek the live session to `positionSeconds`.
+    Q_INVOKABLE void applyResume(const QString &identity, double positionSeconds);
+
+    // Resume thresholds (DESIGN.md §19.6), exposed for tests and callers.
+    static constexpr double kMinResumeSeconds = 5.0;
+    static constexpr double kTailGuardSeconds = 10.0;
+
+signals:
+    void sessionChanged();
+    void backendChanged();
+    void playbackStarted(const QString &path);
+    void playbackStopped();
+    // Emitted at most every 5s with the current session identity+position.
+    void positionTick(const QString &identity, double positionSeconds);
+    // Ask policy: the stored position is available; the UI decides (DESIGN §19.6).
+    void resumePromptRequested(const QString &identity, double positionSeconds);
+    // A seek was refused because the current media is not seekable (§3.1):
+    // the session position has been restored; the UI may flash the affordance.
+    void seekRejected();
+
+private:
+    explicit PlaybackManager(QObject *parent = nullptr);
+
+    void loadFile(const QString &path, double startPos);
+    void updateSessionFromMpv();
+    // Read the live position and (optionally force) publish it as positionTick.
+    // Deduped so stop()+close() cannot double-write the same value.
+    void writePosition(bool force);
+
+    // Mirror mpv's observed properties into the session (DESIGN.md §19.2):
+    // the transport reads the session, so EOF/loading/error/external stop and
+    // duration/position/seekable must all flow through here.
+    void onMpvPropertyChanged(const QString &name, const QVariant &value);
+    void onMpvFileLoaded();
+    void onMpvEndFile(int reason, int error);
+
+    void connectBackend();
+
+    static PlaybackManager *instance_;
+
+    // QPointer: PlaybackManager is a process singleton and outlives any one
+    // backend, so the pointer must self-null when the backend is destroyed.
+    QPointer<MpvBackend> backend_ = nullptr;
+    QPointer<VideoSurfaceItem> surface_;
+    void flushPendingLoad();
+
+    PlaybackSession *session_ = nullptr;
+    QString pendingPath_;
+    double pendingStart_ = -1;
+    bool loadPending_ = false;
+    int resumePolicy_ = 0; // 0 Always, 1 Ask, 2 Never
+    double lastTickTime_ = 0;
+    // Identity-keyed stored-position lookup (ms), injected by composition.
+    std::function<qint64(const QString &)> positionLoader_;
+    // Dedupe identical consecutive writes (stop() then close(), etc.).
+    QString lastWrittenIdentity_;
+    qint64 lastWrittenMs_ = -1;
+    QTimer *tickTimer_ = nullptr; // 5s periodic position persistence
+};

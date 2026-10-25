@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=QG
+Name[de]=QG
+Comment=Video Explorer — browse, search, and play videos on your filesystem
+Comment[de]=Video-Explorer — Videos durchsuchen, suchen und abspielen
+Exec=qg %U
+TryExec=qg
+Icon=io.github.QGayze.QG
+Terminal=false
+Categories=AudioVideo;Player;Video;
+Keywords=video;movie;media;player;explorer;
+MimeType=video/mp4;video/x-matroska;video/webm;video/x-msvideo;video/quicktime;video/x-m4v;video/mpeg;video/mp2t;video/avi;
+StartupNotify=true
+StartupWMClass=qg
+X-GNOME-UsesNotifications=true
