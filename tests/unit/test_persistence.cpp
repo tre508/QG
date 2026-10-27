@@ -26,6 +26,7 @@ private slots:
     void corruptDatabaseIsQuarantinedNotDestroyed();
     void secondConnectionReadsAfterWrite();
     void repositoriesRoundTrip();
+    void writeFailureIsReturnedWhenQueryOnly();
 
 private:
     static QString dbPath(const QTemporaryDir &dir)
@@ -212,6 +213,23 @@ void PersistenceTest::repositoriesRoundTrip()
     const SortSpec defaulted = settings.sortSpec(QStringLiteral("/nowhere"));
     QCOMPARE(defaulted.key, SortKey::Name);
     QCOMPARE(defaulted.direction, SortDirection::Ascending);
+}
+
+void PersistenceTest::writeFailureIsReturnedWhenQueryOnly()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    Database db;
+    QVERIFY(db.open(dbPath(dir)));
+
+    MediaStateRepository media(db);
+    QVERIFY(media.setFavorite(QStringLiteral("id"), false));
+    QVERIFY(db.execute(QStringLiteral("PRAGMA query_only = ON;")));
+
+    const Result<void> failed = media.setFavorite(QStringLiteral("id"), true);
+    QVERIFY(!failed);
+    QCOMPARE(failed.error().code, ErrorCode::OperationFailed);
+    QVERIFY(!failed.error().message.isEmpty());
 }
 
 QTEST_GUILESS_MAIN(PersistenceTest)

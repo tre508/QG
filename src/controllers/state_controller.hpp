@@ -46,6 +46,8 @@ public slots:
 signals:
     void favoriteChanged(const QString &identity, bool value);
     void watchedChanged(const QString &identity, bool value);
+    void operationFailed(const QString &operation, const QString &identity,
+                         const QString &message);
 
 private:
     bool currentFavorite(const QString &identity) const;

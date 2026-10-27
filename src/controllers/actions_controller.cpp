@@ -1,4 +1,5 @@
 #include "actions_controller.hpp"
+#include "filesystem/paths.hpp"
 #include "filesystem/operations.hpp"
 #include "filesystem/trash.hpp"
 
@@ -37,6 +38,14 @@ void ActionsController::setFileOperations(FileOperationsService* ops)
     }
 }
 void ActionsController::setTrashService(TrashService* trash) { trash_ = trash; }
+
+void ActionsController::toastForFailure(const QString& kind, const QString& message)
+{
+    emit toastRequested(message.isEmpty()
+                            ? QStringLiteral("Could not save %1.").arg(kind)
+                            : message,
+                        QString(), QString());
+}
 
 void ActionsController::rename(const QString& path, const QString& newBaseName) {
     emit renameRequested(path, newBaseName);
@@ -309,10 +318,52 @@ QString ActionsController::targetPathForRename(const QString& path,
     const QFileInfo fi(path);
     QString newName = newBaseName;
     const QString suffix = fi.suffix();
-    if (!suffix.isEmpty() && !newName.endsWith(QLatin1Char('.') + suffix)) {
+    if (!suffix.isEmpty()
+        && !newName.endsWith(QLatin1Char('.') + suffix, Qt::CaseInsensitive)) {
         newName += QLatin1Char('.') + suffix;
     }
     return fi.absolutePath() + QDir::separator() + newName;
+}
+
+QVariantMap ActionsController::validateRename(const QString& path,
+                                              const QString& newBaseName,
+                                              const QStringList& siblingNames) const
+{
+    QVariantMap result;
+    result.insert(QStringLiteral("ok"), false);
+
+    const QFileInfo fi(path);
+    if (!fi.exists()) {
+        result.insert(QStringLiteral("message"),
+                      QStringLiteral("The file no longer exists"));
+        return result;
+    }
+
+    // Preserve the extension exactly as renameSync() does. A case-insensitive
+    // test prevents clip.MKV from becoming clip.MKV.mkv.
+    QString name = newBaseName;
+    const QString suffix = fi.suffix();
+    if (!suffix.isEmpty()
+        && !name.endsWith(QLatin1Char('.') + suffix, Qt::CaseInsensitive)) {
+        name += QLatin1Char('.') + suffix;
+    }
+
+    // Renaming to the current complete filename is a valid no-op, not a
+    // collision with the source row.
+    if (name == fi.fileName()) {
+        result.insert(QStringLiteral("ok"), true);
+        result.insert(QStringLiteral("message"), QString());
+        result.insert(QStringLiteral("finalName"), name);
+        return result;
+    }
+
+    QStringList others = siblingNames;
+    others.removeAll(fi.fileName());
+    const qg::FilenameValidation validation = qg::validateFilename(name, others, true);
+    result.insert(QStringLiteral("ok"), validation.ok());
+    result.insert(QStringLiteral("message"), validation.message);
+    result.insert(QStringLiteral("finalName"), name);
+    return result;
 }
 
 bool ActionsController::pathExists(const QString& path) const

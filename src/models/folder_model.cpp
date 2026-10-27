@@ -341,15 +341,61 @@ QList<Entry> FolderModel::entries() const
 
 void FolderModel::reorder(const SortSpec &spec)
 {
+    // Qt's reorder contract (§20.1): emit about-to-change first, then remap
+    // persistent indexes, then emit changed. Without layoutAboutToBeChanged
+    // and changePersistentIndexList, proxies and current-item bindings keep
+    // pointing at the old row numbers after a sort (AUD-022).
+    emit layoutAboutToBeChanged({}, QAbstractItemModel::VerticalSortHint);
+
+    const QModelIndexList persistent = persistentIndexList();
+    QStringList persistentIdentities;
+    persistentIdentities.reserve(persistent.size());
+    for (const QModelIndex &index : persistent) {
+        const int row = index.row();
+        persistentIdentities.append(row >= 0 && row < m_entries.size()
+                                       ? m_entries.at(row).identity
+                                       : QString());
+    }
+
     m_entries = SortService::apply(m_entries, spec);
-    // Ordering changed only; contents, thumbnails and counts are unchanged.
-    emit layoutChanged();
+
+    QHash<QString, int> rowByIdentity;
+    rowByIdentity.reserve(m_entries.size());
+    for (int row = 0; row < m_entries.size(); ++row) {
+        rowByIdentity.insert(m_entries.at(row).identity, row);
+    }
+
+    QModelIndexList from;
+    QModelIndexList to;
+    from.reserve(persistent.size());
+    to.reserve(persistent.size());
+    for (int i = 0; i < persistent.size(); ++i) {
+        const QString identity = persistentIdentities.at(i);
+        if (identity.isEmpty()) {
+            continue;
+        }
+        const auto it = rowByIdentity.constFind(identity);
+        if (it == rowByIdentity.constEnd()) {
+            continue; // identity removed by reorder (should not happen)
+        }
+        from.append(persistent.at(i));
+        to.append(index(it.value(), persistent.at(i).column()));
+    }
+    changePersistentIndexList(from, to);
+
+    emit layoutChanged({}, QAbstractItemModel::VerticalSortHint);
 }
 
 QString FolderModel::pathAt(int row) const
 {
     const Entry *entry = entryAt(row);
     return entry != nullptr ? entry->path : QString();
+}
+
+QString FolderModel::pathForIdentity(const QString &identity) const
+{
+    const int row = indexOfIdentity(identity);
+    return row >= 0 ? m_entries.at(row).path : QString();
 }
 
 QString FolderModel::nameAt(int row) const

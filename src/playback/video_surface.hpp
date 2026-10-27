@@ -1,19 +1,12 @@
 #pragma once
+#include <QPointer>
 #include <QQuickFramebufferObject>
 
 #include <atomic>
+#include <memory>
 
 struct mpv_render_context;
-
-// VideoSurfaceItem: presents mpv frames inside the Qt Quick scene graph
-// (DESIGN.md §19.3). It is a QQuickFramebufferObject so Qt allocates an FBO
-// sized to THIS item (in device pixels) and composites it at the item's own
-// rect. That is what keeps mpv frames inside the Stage instead of at the
-// window origin: mpv always renders with viewport (0,0,w,h) of the FBO it is
-// given, so it must be given an item-sized FBO, never the window FBO.
-//
-// This is the only place mpv frames enter the Qt Quick scene graph.
-
+struct MpvUpdateTarget;
 class MpvBackend;
 
 class VideoSurfaceItem : public QQuickFramebufferObject {
@@ -26,34 +19,42 @@ public:
     explicit VideoSurfaceItem(QQuickItem* parent = nullptr);
     ~VideoSurfaceItem() override;
 
-    MpvBackend* backend() const { return backend_; }
-    void setBackend(MpvBackend* b);
-
+    MpvBackend* backend() const { return backend_.data(); }
+    void setBackend(MpvBackend* backend);
     bool videoActive() const { return videoActive_; }
+    std::shared_ptr<MpvUpdateTarget> updateTarget() const { return updateTarget_; }
+    std::shared_ptr<std::atomic<bool>> renderContextFreePending() const {
+        return renderContextFreePending_;
+    }
 
-    // Diagnostic: number of mpv frames presented to the scene graph.
+    // Hand the render context back to the render thread for freeing.
+    // The creating OpenGL context must be current.
+    void scheduleRenderContextFree(mpv_render_context* ctx);
+
     int framesRendered() const { return framesRendered_.load(); }
-    // Called from the render thread.
     void noteFrameRendered() { framesRendered_.fetch_add(1); }
 
 signals:
     void backendChanged();
     void videoActiveChanged();
-    // Emitted on the GUI thread once mpv's render context exists; mpv must not
-    // be asked to play before this (vo=libmpv ends the file otherwise).
     void renderContextReady();
+    // Emitted on the GUI thread after render-thread cleanup completes.
+    void renderContextFreed();
 
 protected:
     Renderer* createRenderer() const override;
 
 private slots:
-    // Marshaled from the render thread when the render context first exists.
     void onRenderContextReady();
+    void onRenderContextFreed();
 
 private:
     friend class VideoRenderer;
+    friend class ContextFreeJob;
 
-    MpvBackend* backend_ = nullptr;
+    QPointer<MpvBackend> backend_;
+    std::shared_ptr<MpvUpdateTarget> updateTarget_;
+    std::shared_ptr<std::atomic<bool>> renderContextFreePending_;
     bool videoActive_ = false;
     std::atomic<int> framesRendered_{0};
 };

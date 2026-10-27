@@ -101,10 +101,7 @@ Result<void> PathRepository::upsert(const QString &path,
     stmt.bindInt64(5, size);
     stmt.bindInt64(6, mtimeNs);
     stmt.bindInt64(7, nowSeconds());
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), path);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 QString PathRepository::identityForPath(const QString &path) const
@@ -185,10 +182,10 @@ Result<void> PathRepository::renamePath(const QString &oldPath,
             return Error::make(ErrorCode::OperationFailed, remove.error(), oldPath);
         }
         remove.bindText(1, oldPath);
-        remove.step();
-        if (!remove.error().isEmpty()) {
+        const Result<void> removed = remove.exec();
+        if (!removed) {
             m_db.execute(QStringLiteral("ROLLBACK;"));
-            return Error::make(ErrorCode::OperationFailed, remove.error(), oldPath);
+            return removed;
         }
     }
 
@@ -208,10 +205,10 @@ Result<void> PathRepository::renamePath(const QString &oldPath,
         insert.bindInt64(3, size);
         insert.bindInt64(4, mtimeNs);
         insert.bindInt64(5, nowSeconds());
-        insert.step();
-        if (!insert.error().isEmpty()) {
+        const Result<void> inserted = insert.exec();
+        if (!inserted) {
             m_db.execute(QStringLiteral("ROLLBACK;"));
-            return Error::make(ErrorCode::OperationFailed, insert.error(), newPath);
+            return inserted;
         }
     }
 
@@ -261,9 +258,9 @@ Result<int> PathRepository::pruneVanished(qint64 graceSeconds)
         return Error::make(ErrorCode::OperationFailed, remove.error());
     }
     remove.bindInt64(1, cutoff);
-    remove.step();
-    if (!remove.error().isEmpty()) {
-        return Error::make(ErrorCode::OperationFailed, remove.error());
+    const Result<void> removed = remove.exec();
+    if (!removed) {
+        return removed.error();
     }
     return static_cast<int>(count);
 }
@@ -282,10 +279,7 @@ Result<void> MediaStateRepository::ensureRow(const QString &identity)
     }
     stmt.bindText(1, identity);
     stmt.bindInt64(2, nowSeconds());
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), identity);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 bool MediaStateRepository::favorite(const QString &identity) const
@@ -337,10 +331,7 @@ Result<void> MediaStateRepository::setFavorite(const QString &identity, bool val
     stmt.bindInt64(1, value ? 1 : 0);
     stmt.bindInt64(2, nowSeconds());
     stmt.bindText(3, identity);
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), identity);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 Result<void> MediaStateRepository::setWatched(const QString &identity, bool value)
@@ -358,10 +349,7 @@ Result<void> MediaStateRepository::setWatched(const QString &identity, bool valu
     stmt.bindInt64(1, value ? 1 : 0);
     stmt.bindInt64(2, nowSeconds());
     stmt.bindText(3, identity);
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), identity);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 Result<void> MediaStateRepository::recordPosition(const QString &identity, qint64 positionMs)
@@ -379,10 +367,7 @@ Result<void> MediaStateRepository::recordPosition(const QString &identity, qint6
     stmt.bindInt64(1, positionMs);
     stmt.bindInt64(2, nowSeconds());
     stmt.bindText(3, identity);
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), identity);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 Result<void> MediaStateRepository::setProbeResult(const QString &identity,
@@ -405,10 +390,7 @@ Result<void> MediaStateRepository::setProbeResult(const QString &identity,
     stmt.bindInt64(3, height);
     stmt.bindInt64(4, nowSeconds());
     stmt.bindText(5, identity);
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), identity);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 bool MediaStateRepository::probeResult(const QString &identity,
@@ -459,10 +441,7 @@ Result<void> ThumbnailRepository::upsertOk(const QString &identity,
     stmt.bindInt64(3, sourceSize);
     stmt.bindText(4, cachePath);
     stmt.bindInt64(5, nowSeconds());
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), identity);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 Result<void> ThumbnailRepository::upsertFailed(const QString &identity,
@@ -485,10 +464,7 @@ Result<void> ThumbnailRepository::upsertFailed(const QString &identity,
     stmt.bindInt64(2, sourceMtimeNs);
     stmt.bindInt64(3, sourceSize);
     stmt.bindInt64(4, nowSeconds());
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), identity);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 bool ThumbnailRepository::lookup(const QString &identity, Record *out) const
@@ -527,10 +503,7 @@ Result<void> RecentRepository::remember(const QString &path)
     }
     stmt.bindText(1, path);
     stmt.bindInt64(2, nowSeconds());
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), path);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 QList<QString> RecentRepository::recent(int limit) const
@@ -565,10 +538,7 @@ Result<void> BookmarkRepository::add(const QString &path, const QString &label)
     }
     stmt.bindText(1, path);
     stmt.bindText(2, label);
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), path);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 Result<void> BookmarkRepository::remove(const QString &path)
@@ -578,10 +548,7 @@ Result<void> BookmarkRepository::remove(const QString &path)
         return Error::make(ErrorCode::OperationFailed, stmt.error(), path);
     }
     stmt.bindText(1, path);
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), path);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 QList<QString> BookmarkRepository::paths() const
@@ -611,10 +578,7 @@ Result<void> SettingsRepository::setValue(const QString &key, const QString &val
     }
     stmt.bindText(1, key);
     stmt.bindText(2, value);
-    if (stmt.step()) {
-        return Error::make(ErrorCode::OperationFailed, stmt.error(), key);
-    }
-    return Result<void>::success();
+    return stmt.exec();
 }
 
 QString SettingsRepository::value(const QString &key) const

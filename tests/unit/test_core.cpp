@@ -42,6 +42,8 @@ private slots:
     void identityUsesInodeForLocalFile();
     void identitySurvivesRename();
     void fingerprintIsContentSensitive();
+    void identityForStatFallsBackWithoutAnInode();
+    void identityForStatUsesPathWhenFingerprintCannotRead();
     void identityReportsMissingFile();
 
     // --- events --------------------------------------------------------------
@@ -203,6 +205,37 @@ void CoreTest::fingerprintIsContentSensitive()
     const Result<FileIdentity> second = fingerprintIdentity(path, 8, 1000);
     QVERIFY(second);
     QVERIFY(first.value().key != second.value().key);
+}
+
+void CoreTest::identityForStatFallsBackWithoutAnInode()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = QDir(dir.path()).filePath(QStringLiteral("network.mp4"));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write("same payload");
+    file.close();
+
+    const auto first = identityForStat(path, 10, 0, 12, 500);
+    const auto second = identityForStat(path, 10, 0, 12, 500);
+    QVERIFY(first);
+    QVERIFY(second);
+    QCOMPARE(first.value().kind, IdentityKind::Fingerprint);
+    QCOMPARE(first.value().key, second.value().key);
+    QVERIFY(!first.value().key.isEmpty());
+}
+
+void CoreTest::identityForStatUsesPathWhenFingerprintCannotRead()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = QDir(dir.path()).filePath(QStringLiteral("missing.mp4"));
+
+    const auto fallback = identityForStat(path, 10, 0, 0, 0);
+    QVERIFY(fallback);
+    QCOMPARE(fallback.value().kind, IdentityKind::PathOnly);
+    QCOMPARE(fallback.value().key, encodePathIdentity(path));
 }
 
 void CoreTest::identityReportsMissingFile()

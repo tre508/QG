@@ -77,6 +77,7 @@ private slots:
     void guiEventLoopKeepsRunningWhileABulkCopyIsInFlight();
     void everyMutatingEntryPointIsRoutedThroughThePool();
     void syncHelpersStayUsableAndAreStillThePayload();
+    void renameSyncRejectsInvalidNames();
     void serviceDestroyedInFlightIsNeverDeliveredTo();
 };
 
@@ -244,7 +245,6 @@ void FileOpsAsyncTest::syncHelpersStayUsableAndAreStillThePayload()
     const OperationResult copied =
         FileOperationsService::copySync({renamed.completedPath}, targetDir);
     QVERIFY(copied.success);
-
     const OperationResult moved =
         FileOperationsService::moveSync({renamed.completedPath}, targetDir);
     QVERIFY(moved.success);
@@ -257,6 +257,20 @@ void FileOpsAsyncTest::syncHelpersStayUsableAndAreStillThePayload()
     const OperationResult ghost =
         FileOperationsService::deletePermanentlySync({dir.filePath(QStringLiteral("nope.mp4"))});
     QVERIFY(!ghost.success);
+}
+
+void FileOpsAsyncTest::renameSyncRejectsInvalidNames()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString source = dir.filePath(QStringLiteral("clip.mp4"));
+    writeFile(source);
+
+    const OperationResult rejected =
+        FileOperationsService::renameSync(source, QStringLiteral("bad/name"));
+    QVERIFY(!rejected.success);
+    QCOMPARE(rejected.error, QStringLiteral("Name cannot contain '/' or NUL"));
+    QVERIFY(QFileInfo::exists(source));
 }
 
 // The receiver is only a lifetime token: a service destroyed while its result is

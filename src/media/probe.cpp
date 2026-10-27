@@ -178,6 +178,32 @@ void MediaProbeService::process(const Entry &entry)
     if (probed.ok()) {
         if (m_database != nullptr) {
             MediaStateRepository media(*m_database);
+            const Result<void> stored = media.setProbeResult(
+                entry.identity, probed.durationMs, probed.width, probed.height);
+            if (!stored) {
+                emit probeFailed(entry.identity);
+                return;
+            }
+            PathRepository paths(*m_database);
+            const Result<void> pathStored = paths.upsert(
+                entry.path, entry.identity, 0, 0, entry.size, entry.mtimeNs);
+            if (!pathStored) {
+                emit probeFailed(entry.identity);
+                return;
+            }
+        }
+        emit probeReady(entry.identity, probed.durationMs, probed.width, probed.height);
+    } else {
+        emit probeFailed(entry.identity);
+    }
+}
+
+void MediaProbeService::applyProbeResult(const Entry &entry, const ProbeResult &probed)
+{
+    // GUI thread: persistence + signal only. No decoder opened (§18.6).
+    if (probed.ok()) {
+        if (m_database != nullptr) {
+            MediaStateRepository media(*m_database);
             media.setProbeResult(entry.identity, probed.durationMs, probed.width, probed.height);
             PathRepository paths(*m_database);
             paths.upsert(entry.path, entry.identity, 0, 0, entry.size, entry.mtimeNs);
@@ -190,20 +216,59 @@ void MediaProbeService::process(const Entry &entry)
 
 void MediaProbeService::pump()
 {
+    // Cache check must run before any worker is dispatched (§18.6, §22.1);
+    // duplicate probes waste CPU and a second GUI-thread open violates
+    // the one-boundary contract (AUD-021).
+    for (int index = 0; index < m_queue.size(); ) {
+        const Entry entry = m_queue.at(index);
+        if (entry.identity.isEmpty() || !entry.isVideo()) {
+            ++index;
+            continue;
+        }
+
+        bool cached = false;
+        if (m_database != nullptr) {
+            PathRepository paths(*m_database);
+            QString identity;
+            qint64 size = 0;
+            qint64 mtimeNs = 0;
+            if (paths.pathInfo(entry.path, &identity, &size, &mtimeNs)
+                && identity == entry.identity && size == entry.size && mtimeNs == entry.mtimeNs) {
+                MediaStateRepository media(*m_database);
+                qint64 durationMs = -1;
+                int width = 0;
+                int height = 0;
+                if (media.probeResult(entry.identity, &durationMs, &width, &height)) {
+                    emit probeReady(entry.identity, durationMs, width, height);
+                    cached = true;
+                }
+            }
+        }
+        if (cached) {
+            m_queue.removeAt(index);
+            continue;
+        }
+        ++index;
+    }
+
     while (m_active < m_maxConcurrent && !m_queue.isEmpty()) {
         const Entry entry = m_queue.dequeue();
         ++m_active;
         const quint64 generation = m_generation;
+        // The result crosses the thread boundary through a shared pointer: the
+        // worker writes into it, and the delivery closure reads the filled
+        // value — never opening the file again on the GUI thread (§18.6, §22.1).
+        auto probed = std::make_shared<ProbeResult>();
 
         submitTask(WorkerPools::cpuMedia(),
                    TaskPriority::Background,
                    nullptr,
                    this,
-                   [this, entry]() { runProbe(entry); },
-                   [this, entry, generation]() {
+                   [this, entry, probed]() { *probed = runProbe(entry); },
+                   [this, entry, generation, probed]() {
                        --m_active;
                        if (generation == m_generation) {
-                           process(entry);
+                           applyProbeResult(entry, *probed);
                        }
                        pump();
                    });

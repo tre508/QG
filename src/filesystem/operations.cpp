@@ -1,5 +1,6 @@
 #include "operations.hpp"
 
+#include "filesystem/paths.hpp"
 #include "workers/tasks.hpp"
 
 #include <QFile>
@@ -127,15 +128,25 @@ OperationResult FileOperationsService::renameSync(const QString& path, const QSt
         return r;
     }
 
-    // Preserve extension by default
+    // Preserve extension by default. This is case-insensitive so clip.MKV does
+    // not become clip.MKV.mkv when the user includes the existing extension.
     QString newName = newBaseName;
-    if (!fi.suffix().isEmpty() && !newName.endsWith('.' + fi.suffix()))
+    if (!fi.suffix().isEmpty()
+        && !newName.endsWith('.' + fi.suffix(), Qt::CaseInsensitive))
         newName += '.' + fi.suffix();
 
     const QString target = fi.absolutePath() + QDir::separator() + newName;
     if (target == path) {
         r.success = true;
         r.completedPath = path;
+        return r;
+    }
+
+    // The inline editor checks this live, but every service caller must receive
+    // the same last-line validation before a filesystem mutation.
+    const qg::FilenameValidation validation = qg::validateFilename(newName);
+    if (!validation.ok()) {
+        r.error = validation.message;
         return r;
     }
     if (QFileInfo::exists(target)) {

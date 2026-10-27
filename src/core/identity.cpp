@@ -69,6 +69,24 @@ Result<FileIdentity> fingerprintIdentity(const QString &path, qint64 size, qint6
                         IdentityKind::Fingerprint};
 }
 
+Result<FileIdentity> identityForStat(const QString &path,
+                                     std::uint64_t device,
+                                     std::uint64_t inode,
+                                     qint64 size,
+                                     qint64 mtimeNs)
+{
+    if (inode != 0) {
+        return identityFromStat(device, inode);
+    }
+    // Network/FUSE filesystems with unstable inodes: fingerprint fallback (§17.8).
+    const Result<FileIdentity> fingerprint = fingerprintIdentity(path, size, mtimeNs);
+    if (fingerprint) {
+        return fingerprint;
+    }
+    // Last resort: path-only identity (explicit degradation, never empty).
+    return FileIdentity{encodePathIdentity(path), IdentityKind::PathOnly};
+}
+
 Result<FileIdentity> identityFromPath(const QString &path)
 {
     struct stat st {};

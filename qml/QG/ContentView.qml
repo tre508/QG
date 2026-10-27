@@ -280,6 +280,20 @@ Item {
     function pathForIndex(index) {
         return (model && model.pathAt) ? model.pathAt(index) : ""
     }
+
+    // Identities (not indexes) in, paths out — the clipboard and the context
+    // menu speak identities, so they must never be fed to pathAt().
+    function pathsForIdentities(ids) {
+        const out = []
+        if (!model || !model.pathForIdentity || !ids)
+            return out
+        for (let i = 0; i < ids.length; ++i) {
+            const p = model.pathForIdentity(ids[i])
+            if (p && p.length > 0)
+                out.push(p)
+        }
+        return out
+    }
     function isFolderForIndex(index) {
         return (model && model.isFolderAt) ? model.isFolderAt(index) : false
     }
@@ -629,6 +643,25 @@ Item {
                                  && selectionState.isSelected(contentView.identityAt(index)))
                               : (index === contentView.selectedIndex)
                     renaming: index === contentView.renameIndex
+                    validateRename: function (newBaseName) {
+                        if (!window.actionsController
+                                || typeof window.actionsController.validateRename !== "function")
+                            return ({ ok: true, message: "" })
+                        const siblings = []
+                        for (let i = 0; i < contentView.itemCount; ++i) {
+                            let name = ""
+                            if (contentView.model && typeof contentView.model.nameAt === "function")
+                                name = contentView.model.nameAt(i)
+                            else if (contentView.model && typeof contentView.model.get === "function") {
+                                const row = contentView.model.get(i)
+                                name = row && row.name !== undefined ? row.name : ""
+                            }
+                            if (name && name.length > 0)
+                                siblings.push(name)
+                        }
+                        return window.actionsController.validateRename(
+                                    contentView.pathForIndex(index), newBaseName, siblings)
+                    }
                     onClicked: contentView.selectIndex(index)
                     onDoubleClicked: contentView.activateIndex(index)
                     // Card actions forward with this row's index (REM-009 / D-04).
@@ -636,9 +669,10 @@ Item {
                     onFavoriteRequested: contentView.requestFavoriteAt(index)
                     onThumbnailRetryRequested: contentView.requestThumbnailRetryAt(index)
                     onRenameCommitted: function (newName) {
-                        contentView.renameIndex = -1
                         contentView.renameCommitted(index, newName)
                     }
+                    onRenameFinished: contentView.renameIndex = -1
+                    onRenameCancelled: contentView.renameIndex = -1
                     onOverflowRequested: {
                         // Pop the menu where the card is, in scene coordinates.
                         const p = mapToItem(null, width, height / 2)

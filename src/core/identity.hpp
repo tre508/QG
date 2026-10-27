@@ -46,6 +46,16 @@ FileIdentity identityFromStat(std::uint64_t device,
 // Lazily computed fingerprint fallback. Reads at most 64 KiB.
 Result<FileIdentity> fingerprintIdentity(const QString &path, qint64 size, qint64 mtimeNs);
 
+// Full ladder for already-collected stat data (§17.8): inode when the
+// filesystem provides one, otherwise (size, mtime_ns, 64 KiB) fingerprint,
+// otherwise path-only. Must run on a worker thread (the fingerprint reads up
+// to 64 KiB from the file).
+Result<FileIdentity> identityForStat(const QString &path,
+                                     std::uint64_t device,
+                                     std::uint64_t inode,
+                                     qint64 size,
+                                     qint64 mtimeNs);
+
 // Full resolution for a path: stat -> inode, else fingerprint, else path-only.
 Result<FileIdentity> identityFromPath(const QString &path);
 

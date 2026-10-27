@@ -105,6 +105,11 @@ TestCase {
         function cut(paths) { cutCalls.push(paths) }
         function trashOne(path) { trashCalls.push(path) }
         function copyPath(path) { copyPathCalls.push(path) }
+        function validateRename(path, base, siblingNames) {
+            if (base.indexOf("/") !== -1)
+                return { ok: false, message: "Name cannot contain '/' or NUL" }
+            return { ok: true, message: "" }
+        }
         function targetPathForRename(path, base) { return renameTarget }
         function pathExists(path) { return renameTargetExists }
         function uniqueBaseName(path, base) { return uniqueRenameBase }
@@ -206,6 +211,7 @@ TestCase {
         const view = createTemporaryObject(contentComponent, testRoot,
                                            { width: 1000, height: 600, model: cardFixture, selectionState: selectionState })
         verify(view !== null)
+        view.forceActiveFocus()
         return { view: view, selectionState: selectionState }
     }
 
@@ -319,13 +325,27 @@ TestCase {
         const cells = collectByName(view, "contentCell", [])
         compare(cells[0].renaming, true)
         compare(cells[1].renaming, false)
+        const editor = findByName(cells[0], "renameEditor")
+        tryCompare(editor, "activeFocus", true)
+        compare(editor.selectedText, "a")
 
-        // The delegate clears the target before forwarding the commit.
+        // The view clears the target after the delegate reports completion; the
+        // delegate never assigns to its bound `renaming` property.
         cells[0].renameCommitted("new.mp4")
+        cells[0].renameFinished()
         compare(view.renameIndex, -1)
         compare(commits.length, 1)
         compare(commits[0].i, 0)
         compare(commits[0].n, "new.mp4")
+
+        view.beginRename(0)
+        compare(cells[0].renaming, true)
+        tryCompare(editor, "activeFocus", true)
+        cells[0].renameCancelled()
+        compare(view.renameIndex, -1)
+        // This fixture exercised real text focus. Destroy it so it cannot make
+        // the next keyboard-routing fixture intentionally suppress its keys.
+        view.destroy()
     }
 
     // --- Main: forwarded intents reach the composed controllers --------------

@@ -5,6 +5,7 @@
 #include <mpv/client.h>
 #include <QTimer>
 #include <QDebug>
+#include <QQuickWindow>
 
 #include <cmath>
 
@@ -48,10 +49,14 @@ void PlaybackManager::setBackend(MpvBackend *backend)
     {
         if (backend_)
             backend_->disconnect(this); // detach from the previous backend
+        if (backend_ && backend_->surface() == surface_.data())
+            backend_->setSurface(nullptr);
         clearSeekIntent();              // a new backend has no position to pursue
         backend_ = backend;
         if (surface_)
             surface_->setBackend(backend_);
+        if (backend_ != nullptr)
+            backend_->setSurface(surface_.data());
         connectBackend();
         emit backendChanged();
         flushPendingLoad();
@@ -205,6 +210,8 @@ void PlaybackManager::attachSurface(VideoSurfaceItem *surface)
 {
     if (surface_ == surface)
         return;
+    if (backend_ != nullptr && backend_->surface() == surface_.data())
+        backend_->setSurface(nullptr);
     surface_ = surface;
     if (surface_)
     {
@@ -214,6 +221,8 @@ void PlaybackManager::attachSurface(VideoSurfaceItem *surface)
         connect(surface_, &VideoSurfaceItem::renderContextReady,
                 this, &PlaybackManager::flushPendingLoad);
     }
+    if (backend_ != nullptr)
+        backend_->setSurface(surface_.data());
     flushPendingLoad();
 }
 

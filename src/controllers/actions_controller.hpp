@@ -23,6 +23,7 @@ public:
     Q_INVOKABLE void rename(const QString& path, const QString& newBaseName);
     Q_INVOKABLE void trash(const QStringList& paths);
     Q_INVOKABLE void trashOne(const QString& path);
+    void toastForFailure(const QString& kind, const QString& message);
     Q_INVOKABLE void reveal(const QString& path);
     Q_INVOKABLE void openWith(const QString& path);
     Q_INVOKABLE void properties(const QString& path);
@@ -43,6 +44,12 @@ public:
     // Real file stats for the Properties dialog (raw values; the presentation
     // formats them). Never fabricated: unknown fields are empty.
     Q_INVOKABLE QVariantMap fileInfo(const QString& path) const;
+    // Live rename validation for the inline editor (§7.2/§11.3). Returns
+    // { ok: bool, message: QString, finalName: QString } and uses the same
+    // canonical validator as the file-operation service.
+    Q_INVOKABLE QVariantMap validateRename(const QString& path,
+                                           const QString& newBaseName,
+                                           const QStringList& siblingNames) const;
     // Extension-preserving rename target (what renameSync will use).
     Q_INVOKABLE QString targetPathForRename(const QString& path,
                                             const QString& newBaseName) const;

@@ -1059,29 +1059,20 @@ ContentView {
     Shortcut { objectName: "kbProperties"; sequence: "Alt+Return"; enabled: !window.cinema && !window.textEditing; onActivated: window.routeKey("item.properties") }
 
     // --- Clipboard / drag-drop keyboard actions (REM-014 / D-27) ---------------
-    Shortcut { objectName: "kbCut"; sequence: "Ctrl+X"; enabled: !window.cinema && !window.textEditing && window.sessionActive; onActivated: {
-        if (window.selectionState && window.actionsController) {
-            const ids = window.selectionIds()
-            if (ids.length > 0) {
-                const path = contentView.pathForIndex(ids[0] ? ids[0] : -1)
-                if (path.length > 0) {
-                    window.actionsController.cut([path])
-                }
-            }
-        }
+    // Clipboard works whenever a selection exists — not only during playback
+    // (§13.2 lists Cut/Copy with no playback precondition), and it resolves
+    // identities to paths instead of treating them as row indexes.
+    Shortcut { objectName: "kbCut"; sequence: "Ctrl+X"; enabled: !window.cinema && !window.textEditing && window.selectionState && window.selectionState.selectedCount > 0; onActivated: {
+        const paths = contentView.pathsForIdentities(
+                          window.selectionState ? window.selectionState.selectedIdentities : [])
+        if (paths.length > 0 && window.actionsController)
+            window.actionsController.cut(paths)
     } }
-    Shortcut { objectName: "kbCopy"; sequence: "Ctrl+C"; enabled: !window.cinema && !window.textEditing && window.sessionActive; onActivated: {
-        if (window.selectionState && window.actionsController) {
-            const ids = window.selectionIds()
-            if (ids.length > 0) {
-                const paths = []
-                for (let i = 0; i < ids.length; ++i) {
-                    const p = contentView.pathForIndex(ids[i] ? ids[i] : -1)
-                    if (p.length > 0) paths.push(p)
-                }
-                if (paths.length > 0) window.actionsController.copyToClipboard(paths)
-            }
-        }
+    Shortcut { objectName: "kbCopy"; sequence: "Ctrl+C"; enabled: !window.cinema && !window.textEditing && window.selectionState && window.selectionState.selectedCount > 0; onActivated: {
+        const paths = contentView.pathsForIdentities(
+                          window.selectionState ? window.selectionState.selectedIdentities : [])
+        if (paths.length > 0 && window.actionsController)
+            window.actionsController.copyToClipboard(paths)
     } }
     Shortcut { objectName: "kbPaste"; sequence: "Ctrl+V"; enabled: !window.cinema && !window.textEditing; onActivated: {
         if (window.actionsController && window.actionsController.clipboardPaths && window.actionsController.clipboardPaths().length > 0) {

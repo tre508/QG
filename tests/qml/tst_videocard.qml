@@ -98,6 +98,58 @@ TestCase {
         compare(findByName(card, "durationText").text, "--:--")
     }
 
+    function test_inlineRenameFocusSelectionValidationAndLifecycle() {
+        const card = makeCard({
+            validateRename: function(name) {
+                if (name.indexOf("/") !== -1)
+                    return { ok: false, message: "Name cannot contain '/' or NUL" }
+                return { ok: true, message: "" }
+            }
+        })
+        const editor = findByName(card, "renameEditor")
+        const error = findByName(card, "renameError")
+        let commits = []
+        let finished = 0
+        let cancelled = 0
+        card.renameCommitted.connect(function(name) { commits.push(name) })
+        card.renameFinished.connect(function() { finished++ })
+        card.renameCancelled.connect(function() { cancelled++ })
+
+        card.renaming = true
+        compare(editor.text, "sunset_sea.mp4")
+        compare(editor.selectedText, "sunset_sea")
+
+        editor.text = "bad/name"
+        compare(editor.renameError, "Name cannot contain '/' or NUL")
+        compare(error.visible, true)
+        editor.accepted()
+        compare(commits.length, 0)
+        compare(finished, 0)
+
+        editor.text = "renamed"
+        compare(editor.renameError, "")
+        editor.accepted()
+        compare(commits, ["renamed"])
+        compare(finished, 1)
+
+        // The card itself does not clear a bound renaming property. Its owner can
+        // clear then re-enter rename mode without the binding being destroyed.
+        card.renaming = false
+        card.renaming = true
+        compare(editor.selectedText, "sunset_sea")
+        card.renameCancelled()
+        compare(cancelled, 1)
+    }
+
+    function test_inlineRenameTabUnlocksExtension() {
+        const card = makeCard({ validateRename: function(name) { return { ok: true, message: "" } } })
+        const editor = findByName(card, "renameEditor")
+        card.renaming = true
+        compare(editor.extensionLocked, true)
+        editor.extensionLocked = false
+        compare(editor.extensionLocked, false)
+    }
+
     // --- VIS-010: a ready thumbnail must actually paint ---------------------
     // The model delivers a URL (file:// in production). This 16x9 PNG keeps the
     // check self-contained while exercising the same Image.source path.

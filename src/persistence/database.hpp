@@ -82,6 +82,8 @@ public:
 
     // Advances one row; returns true when a row is available.
     bool step();
+    // Execute a single INSERT/UPDATE/DELETE and report SQLite errors.
+    Result<void> exec();
 
     bool columnIsNull(int index) const;
     QString columnText(int index) const;

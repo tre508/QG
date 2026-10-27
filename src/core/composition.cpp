@@ -209,10 +209,18 @@ void CoreServices::wire(Database *database,
     m_keyboard->setPlaybackManager(m_playbackManager);
 
     // Throttled position ticks persist by identity (§19.6).
-    QObject::connect(m_playbackManager, &PlaybackManager::positionTick,
-                     m_state.get(),
-                     [this](const QString &identity, double seconds) {
-                         m_state->recordPosition(identity, static_cast<qint64>(seconds * 1000.0));
+    connect(m_playbackManager, &PlaybackManager::positionTick,
+            m_state.get(),
+            [this](const QString &identity, double seconds) {
+                m_state->recordPosition(identity, static_cast<qint64>(seconds * 1000.0));
+            });
+    QObject::connect(m_state.get(), &StateController::operationFailed,
+                     m_actions.get(),
+                     [actions = m_actions.get()](const QString &operation,
+                                                 const QString &identity,
+                                                 const QString &message) {
+                         Q_UNUSED(identity);
+                         actions->toastForFailure(operation, message);
                      });
 }
 

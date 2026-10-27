@@ -148,11 +148,23 @@ FolderSnapshot FilesystemEnumerator::enumerate(const QString &path,
         value.kind = isDir ? EntryKind::Folder : EntryKind::Video;
         value.size = isDir ? 0 : static_cast<qint64>(st.st_size);
         value.mtimeNs = mtimeNs(st);
-        if (st.st_ino != 0) {
-            value.identity = identityFromStat(static_cast<quint64>(st.st_dev),
-                                              static_cast<quint64>(st.st_ino))
-                                 .key;
+        // Full identity ladder (§17.8): inode when available; for filesystems
+        // reporting ino == 0, degrade to fingerprint / path-only without leaving
+        // the identity empty (AUD-020). identityForStat runs the fingerprint
+        // read and must stay on the I/O pool.
+        const Result<FileIdentity> identity = identityForStat(
+            fullPath,
+            static_cast<std::uint64_t>(st.st_dev),
+            static_cast<std::uint64_t>(st.st_ino),
+            isDir ? 0 : static_cast<qint64>(st.st_size),
+            value.mtimeNs);
+        if (!identity) {
+            appendError(snapshot, fullPath,
+                        QStringLiteral("Identity fallback failed: ")
+                            + identity.error().message);
+            continue;
         }
+        value.identity = identity.value().key;
 
         batch.append(value);
         if (batch.size() >= batchSize) {

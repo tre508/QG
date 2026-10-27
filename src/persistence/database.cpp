@@ -301,6 +301,20 @@ bool Statement::step()
     return false;
 }
 
+Result<void> Statement::exec()
+{
+    if (m_stmt == nullptr) {
+        return Error::make(ErrorCode::OperationFailed,
+                           QStringLiteral("Statement is not prepared"));
+    }
+    const int rc = sqlite3_step(m_stmt);
+    if (rc == SQLITE_DONE || rc == SQLITE_ROW) {
+        return Result<void>::success();
+    }
+    m_error = QString::fromUtf8(sqlite3_errmsg(sqlite3_db_handle(m_stmt)));
+    return Error::make(ErrorCode::OperationFailed, m_error, {}, rc);
+}
+
 bool Statement::columnIsNull(int index) const
 {
     return m_stmt == nullptr || sqlite3_column_type(m_stmt, index) == SQLITE_NULL;

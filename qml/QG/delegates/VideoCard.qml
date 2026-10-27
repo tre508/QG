@@ -55,8 +55,11 @@ Item {
     // Inline rename (P62, DESIGN.md §11.3)
     property bool renaming: false
     property bool extensionLock: true
-    property var collisionCheck: null // function(name) -> bool (optional)
+    // Injected by ContentView: (newBaseName) -> { ok, message, finalName }.
+    property var validateRename: null
     signal renameCommitted(string newName)
+    signal renameFinished()
+    signal renameCancelled()
 
     readonly property bool isHovered: hovered || hoverArea.containsMouse
     readonly property bool hasProgress: watched || progress > 0
@@ -487,46 +490,86 @@ Item {
             property string renameError: ""
             property bool extensionLocked: true
 
-            Component.onCompleted: {
+            function prepareForRename() {
+                text = card.fileName
+                extensionLocked = card.extensionLock
                 const dot = card.fileName.lastIndexOf(".")
-                if (card.extensionLock && dot > 0) {
-                    text = card.fileName
-                    cursorPosition = dot
-                    select(cursorPosition, text.length) // select the locked extension
+                if (extensionLocked && dot > 0) {
+                    // The filename stem is selected while the extension remains
+                    // visible and unselected (§7.1).
+                    cursorPosition = 0
+                    select(0, dot)
                 } else {
-                    text = card.fileName
                     selectAll()
                 }
+                forceActiveFocus()
             }
 
             onAccepted: {
-                if (renameError.length > 0) return
+                if (renameError.length > 0)
+                    return
                 card.renameCommitted(text)
-                card.renaming = false
+                // ContentView owns renameIndex. Assigning card.renaming here
+                // would destroy its delegate binding and prevent a second rename.
+                card.renameFinished()
             }
 
             Keys.onEscapePressed: {
-                card.renaming = false
+                card.renameCancelled()
+                event.accepted = true
             }
 
-            // Live validation: red underline when invalid/collision
-            onTextChanged: {
-                if (text.trim().length === 0 || text === card.fileName) {
-                    renameError = ""
-                    return
+            Keys.onTabPressed: {
+                // Tab explicitly unlocks the extension for editing (§11.3).
+                if (extensionLocked) {
+                    extensionLocked = false
+                    const dot = text.lastIndexOf(".")
+                    if (dot > 0) {
+                        cursorPosition = dot + 1
+                        select(dot + 1, text.length)
+                    } else {
+                        cursorPosition = text.length
+                    }
+                    event.accepted = true
                 }
-                const dot = text.lastIndexOf(".")
-                const base = dot > 0 ? text.left(dot) : text
-                if (base.length === 0) {
-                    renameError = qsTr("Name cannot be empty")
-                    return
-                }
-                // Collision detection against injected callback (optional)
-                if (card.collisionCheck && card.collisionCheck(text))
-                    renameError = qsTr("A file named \"%1\" already exists").arg(text)
-                else
-                    renameError = ""
             }
+
+            // Live validation through the C++ canonical validator. There is no
+            // QML reimplementation (and therefore no identity of rules to drift).
+            onTextChanged: {
+                if (!card.validateRename) {
+                    renameError = ""
+                    return
+                }
+                const verdict = card.validateRename(text)
+                renameError = verdict && verdict.ok === true ? ""
+                                                              : (verdict && verdict.message
+                                                                 ? "" + verdict.message : "")
+            }
+
+            Connections {
+                target: card
+                function onRenamingChanged() {
+                    if (card.renaming)
+                        renameField.prepareForRename()
+                }
+            }
+        }
+
+        Text {
+            id: renameErrorLabel
+            objectName: "renameError"
+            visible: card.renaming && renameField.renameError.length > 0
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: renameField.bottom
+            anchors.leftMargin: Theme.space2
+            anchors.rightMargin: Theme.space2
+            anchors.topMargin: Theme.scale(2)
+            color: Theme.danger
+            font.pixelSize: Theme.fontMeta
+            elide: Text.ElideRight
+            text: renameField.renameError
         }
 
         Text {
@@ -534,9 +577,8 @@ Item {
             visible: card.detailedMeta
             anchors.left: parent.left
             anchors.right: parent.right
-            // Anchored to the filename, not a fixed offset from the well: the
-            // hard-coded 20px collided with the name once font scale rose.
-            anchors.top: filename.bottom
+            // The inline validation message reserves its own vertical space.
+            anchors.top: card.renaming ? renameErrorLabel.bottom : filename.bottom
             anchors.topMargin: Theme.scale(2)
             anchors.leftMargin: Theme.space2
             anchors.rightMargin: Theme.space2

@@ -63,6 +63,7 @@ signals:
 private:
     ProbeResult runProbe(const Entry &entry) const;
     void process(const Entry &entry);
+    void applyProbeResult(const Entry &entry, const ProbeResult &probed);
     void pump();
 
     Database *m_database = nullptr;

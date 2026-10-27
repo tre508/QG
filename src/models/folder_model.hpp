@@ -111,6 +111,9 @@ public:
 
     // QML-facing row access (used by the view for keyboard activation).
     Q_INVOKABLE QString pathAt(int row) const;
+    // Identity → path. Clipboard/menu actions carry identities, never row
+    // indexes: passing an identity to pathAt() silently resolved to row 0.
+    Q_INVOKABLE QString pathForIdentity(const QString &identity) const;
     Q_INVOKABLE QString nameAt(int row) const;
     Q_INVOKABLE bool isFolderAt(int row) const;
     // Persistent QG flags for the Properties surface (DESIGN §11.1). Identity-

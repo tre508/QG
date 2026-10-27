@@ -60,7 +60,12 @@ void StateController::setFavorite(const QString &identity, bool value)
     }
     if (m_database != nullptr) {
         MediaStateRepository repository(*m_database);
-        repository.setFavorite(identity, value);
+        const Result<void> stored = repository.setFavorite(identity, value);
+        if (!stored) {
+            emit operationFailed(QStringLiteral("favorite"), identity,
+                                 stored.error().message);
+            return;
+        }
     }
     if (m_model != nullptr) {
         m_model->updateFavorite(identity, value);
@@ -75,7 +80,12 @@ void StateController::setWatched(const QString &identity, bool value)
     }
     if (m_database != nullptr) {
         MediaStateRepository repository(*m_database);
-        repository.setWatched(identity, value);
+        const Result<void> stored = repository.setWatched(identity, value);
+        if (!stored) {
+            emit operationFailed(QStringLiteral("watched"), identity,
+                                 stored.error().message);
+            return;
+        }
     }
     if (m_model != nullptr) {
         m_model->updateWatched(identity, value);
@@ -90,7 +100,12 @@ void StateController::recordPosition(const QString &identity, qint64 positionMs)
     }
     if (m_database != nullptr) {
         MediaStateRepository repository(*m_database);
-        repository.recordPosition(identity, positionMs);
+        const Result<void> stored = repository.recordPosition(identity, positionMs);
+        if (!stored) {
+            emit operationFailed(QStringLiteral("position"), identity,
+                                 stored.error().message);
+            return;
+        }
     }
 
     const qint64 duration = durationFor(identity);

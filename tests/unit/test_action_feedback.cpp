@@ -51,9 +51,12 @@ private slots:
     void renameSuccessReportsServiceOutcome();
     void renameCollisionReportsFailureAndToasts();
     void renameHelpersReadTheRealFilesystem();
+    void renameValidationUsesCanonicalRules();
     void uniqueBaseNameSuffixesOnlyWhenTaken();
     void fileInfoReportsRealStats();
     void trashFailureIsNeverAPhantomSuccess();
+    void trashInfoFailureLeavesSourceInPlace();
+    void trashRestoreRefusesOutsidePayload();
     void trashThenUndoRoundTrips();
     void copyPathPutsThePathOnTheClipboard();
     void clipboardCutPasteMovesFile();
@@ -138,6 +141,41 @@ void ActionFeedbackTest::renameHelpersReadTheRealFilesystem()
     QVERIFY(!actions.pathExists(QString()));
 }
 
+void ActionFeedbackTest::renameValidationUsesCanonicalRules()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString clip = dir.filePath(QStringLiteral("clip.MKV"));
+    writeFile(clip);
+
+    ActionsController actions;
+    const QStringList siblings{QStringLiteral("clip.MKV"), QStringLiteral("Taken.mkv")};
+
+    QVariantMap verdict = actions.validateRename(clip, QStringLiteral("holiday"), siblings);
+    QVERIFY(verdict.value(QStringLiteral("ok")).toBool());
+    QCOMPARE(verdict.value(QStringLiteral("finalName")).toString(), QStringLiteral("holiday.MKV"));
+
+    verdict = actions.validateRename(clip, QStringLiteral("clip.mkv"), siblings);
+    QVERIFY(verdict.value(QStringLiteral("ok")).toBool());
+    QCOMPARE(verdict.value(QStringLiteral("finalName")).toString(), QStringLiteral("clip.mkv"));
+
+    verdict = actions.validateRename(clip, QStringLiteral("bad/name"), siblings);
+    QVERIFY(!verdict.value(QStringLiteral("ok")).toBool());
+    QCOMPARE(verdict.value(QStringLiteral("message")).toString(),
+             QStringLiteral("Name cannot contain '/' or NUL"));
+
+    verdict = actions.validateRename(clip, QStringLiteral("taken"), siblings);
+    QVERIFY(!verdict.value(QStringLiteral("ok")).toBool());
+    QCOMPARE(verdict.value(QStringLiteral("message")).toString(),
+             QStringLiteral("A file with that name already exists"));
+
+    verdict = actions.validateRename(dir.filePath(QStringLiteral("gone.mkv")),
+                                     QStringLiteral("new"), siblings);
+    QVERIFY(!verdict.value(QStringLiteral("ok")).toBool());
+    QCOMPARE(verdict.value(QStringLiteral("message")).toString(),
+             QStringLiteral("The file no longer exists"));
+}
+
 void ActionFeedbackTest::uniqueBaseNameSuffixesOnlyWhenTaken()
 {
     QTemporaryDir dir;
@@ -199,6 +237,56 @@ void ActionFeedbackTest::trashFailureIsNeverAPhantomSuccess()
     QVERIFY(!toasts.at(0).at(0).toString().isEmpty());
     QCOMPARE(actions.canUndoTrash(), false);
     QCOMPARE(actions.undoLastTrash(), false); // nothing to undo
+}
+
+void ActionFeedbackTest::trashInfoFailureLeavesSourceInPlace()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString dataHome = dir.filePath("xdg");
+    const QString trashDir = dataHome + QStringLiteral("/Trash");
+    QVERIFY(QDir().mkpath(trashDir + QStringLiteral("/files")));
+    qputenv("XDG_DATA_HOME", dataHome.toUtf8());
+    qputenv("HOME", dir.path().toUtf8());
+
+    const QString clip = dir.filePath("clip.mp4");
+    writeFile(clip);
+    const QString infoPath = trashDir + QStringLiteral("/info/clip.mp4.trashinfo");
+
+    // Force the info-file open to fail even when tests run with elevated
+    // permissions: a regular file blocks creation of Trash/info/*.trashinfo.
+    writeFile(trashDir + QStringLiteral("/info"), QByteArrayLiteral("blocker"));
+    TrashResult result = TrashService::trashFallback(clip);
+    QVERIFY(!result.success);
+    QVERIFY(!result.error.isEmpty());
+    QVERIFY(QFileInfo::exists(clip));
+    QVERIFY(!QFileInfo::exists(trashDir + QStringLiteral("/files/clip.mp4")));
+
+    QVERIFY(QFile::remove(trashDir + QStringLiteral("/info")));
+    QVERIFY(QDir().mkpath(trashDir + QStringLiteral("/info")));
+    writeFile(infoPath, QByteArrayLiteral("occupied"));
+    result = TrashService::trashFallback(clip);
+    QVERIFY(!result.success);
+    QVERIFY(!result.error.isEmpty());
+    QVERIFY(QFileInfo::exists(clip));
+    QVERIFY(!QFileInfo::exists(trashDir + QStringLiteral("/files/clip.mp4")));
+    QCOMPARE(QFile(infoPath).size(), qint64(8));
+}
+
+void ActionFeedbackTest::trashRestoreRefusesOutsidePayload()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString dataHome = dir.filePath("xdg");
+    QVERIFY(QDir().mkpath(dataHome));
+    qputenv("XDG_DATA_HOME", dataHome.toUtf8());
+    qputenv("HOME", dir.path().toUtf8());
+
+    const QString outside = dir.filePath("outside.mp4");
+    writeFile(outside);
+    QVERIFY(!TrashService::restoreFallback(outside, dir.filePath("restored.mp4")));
+    QVERIFY(QFileInfo::exists(outside));
+    QVERIFY(!QFileInfo::exists(dir.filePath("restored.mp4")));
 }
 
 void ActionFeedbackTest::trashThenUndoRoundTrips()

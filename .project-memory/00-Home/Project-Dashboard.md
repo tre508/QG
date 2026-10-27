@@ -82,9 +82,9 @@ AUD-006 (persisted favorite/watched/progress never applied after the first navig
 
 AUD-010 (Cinema never entered fullscreen — the whole intensity ran inside a decorated window) is **implemented and statically reviewed, not runtime-verified** (2026-10-27, FIX-STAGE-01 / AUD-010 half): `Main.qml` remembers `window.visibility`, sets `Window.FullScreen` on entry (Stage focus + both transport overlays), and restores the remembered state on exit, using the existing window throughout. Static instruments only (`qmllint` control pair: 141 vs 139, no new diagnostic class); the X11 checks and the offscreen `visibility` property assertion are deferred — `Window.FullScreen` is a no-op under `QT_QPA_PLATFORM=offscreen` ([[2026-10-27-fix-aud-010-cinema-fullscreen]]).
 
-**Frozen by policy**: no new runs are recorded until an authorized batch testing
-phase. Outstanding checks live in [[Deferred-Test-Register]]; details in
-[[Test-Results]].
+**FIX-DB-01 (AUD-017) and the trash-integrity portion of FIX-FO-01 (AUD-018) were implemented and verified 2026-10-27 after the user authorized a full build and explicit SQLite/trash probes.** Full build passed. Focused runs: persistence 9/9 (includes `PRAGMA query_only=ON` failure), probe wiring 6/6, state controller 7/7, trash feedback cases 6/6, playback lifecycle 5/5, video surface 6/6. The final action-feedback run covers the deterministic `Trash/info` blocker fixture. See `DEFERRED_TESTS.md` and the root-cause notes. CTest, GUI-rendered toast verification, and probe-write-failure injection remain deferred. Cross-device fallback (AUD-019) is still open.
+
+**Frozen by policy**: authorized targeted testing was performed for FIX-DB-01 / FIX-FO-01 on 2026-10-27 and is recorded in [[Deferred-Test-Register]]. Full CTest, GUI toast display and probe-write-failure integration remain unverified. Other outstanding checks live in [[Deferred-Test-Register]]; details in [[Test-Results]].
 
 ## Active Workstreams
 

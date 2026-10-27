@@ -77,20 +77,36 @@ TrashResult TrashService::trashFallback(const QString& path) {
         ++suffix;
     }
 
-    if (!QFile::rename(path, target)) {
-        r.error = QStringLiteral("Trash move failed");
+    // The display name is not an atomic collision lock; refuse an existing
+    // info record rather than truncate another entry's metadata.
+    const QString infoPath = infoDir + QDir::separator() + name + QStringLiteral(".trashinfo");
+    const QByteArray content = QStringLiteral("[Trash Info]\nPath=%1\nDeletionDate=%2\n")
+                                   .arg(QUrl::fromLocalFile(path).toEncoded(),
+                                        QDateTime::currentDateTime().toString(Qt::ISODate))
+                                   .toUtf8();
+    QFile infoFile(infoPath);
+    if (QFileInfo::exists(infoPath)) {
+        r.error = QStringLiteral("Trash info record already exists");
+        return r;
+    }
+    if (!infoFile.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+        r.error = QStringLiteral("Cannot write the trash info file: %1")
+                      .arg(infoFile.errorString());
+        return r;
+    }
+    const qint64 written = infoFile.write(content);
+    const QString writeError = infoFile.errorString();
+    infoFile.close();
+    if (written != content.size()) {
+        QFile::remove(infoPath);
+        r.error = QStringLiteral("Cannot write the trash info file: %1").arg(writeError);
         return r;
     }
 
-    // Write .trashinfo
-    const QString infoPath = infoDir + QDir::separator() + name + QStringLiteral(".trashinfo");
-    const QString content = QStringLiteral("[Trash Info]\nPath=%1\nDeletionDate=%2\n")
-                                .arg(QUrl::fromLocalFile(path).toEncoded(),
-                                     QDateTime::currentDateTime().toString(Qt::ISODate));
-    QFile infoFile(infoPath);
-    if (infoFile.open(QIODevice::WriteOnly)) {
-        infoFile.write(content.toUtf8());
-        infoFile.close();
+    if (!QFile::rename(path, target)) {
+        QFile::remove(infoPath);
+        r.error = QStringLiteral("Trash move failed");
+        return r;
     }
 
     r.success = true;
@@ -100,7 +116,25 @@ TrashResult TrashService::trashFallback(const QString& path) {
 }
 
 bool TrashService::restoreFallback(const QString& trashPath, const QString& originalPath) {
+    const QString filesRoot = QDir(trashRoot()).filePath(QStringLiteral("files"))
+                              + QDir::separator();
+    const QString canonicalFilesRoot = QDir::cleanPath(filesRoot) + QDir::separator();
+    const QString canonicalTrashPath = QFileInfo(trashPath).canonicalFilePath();
+    const QString canonicalRoot = QFileInfo(canonicalFilesRoot).canonicalFilePath();
+    if (canonicalTrashPath.isEmpty() || canonicalRoot.isEmpty()
+        || !canonicalTrashPath.startsWith(canonicalRoot)) {
+        return false;
+    }
+
+    const QString name = QFileInfo(canonicalTrashPath).fileName();
+    if (name.isEmpty())
+        return false;
     QDir dir;
     if (dir.exists(originalPath)) return false; // collision: do not overwrite
-    return QFile::rename(trashPath, originalPath);
+    if (!QFile::rename(canonicalTrashPath, originalPath))
+        return false;
+
+    QFile::remove(QDir(trashRoot()).filePath(
+        QStringLiteral("info/") + name + QStringLiteral(".trashinfo")));
+    return true;
 }

@@ -4,80 +4,68 @@
 #include <mpv/client.h>
 #include <mpv/render_gl.h>
 
+#include <QDebug>
+#include <QMetaObject>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLFunctions>
-#include <QPointer>
-#include <QMetaObject>
-#include <QDebug>
+#include <QQuickWindow>
+#include <QRunnable>
+
+#include <mutex>
+#include <utility>
 
 namespace {
 
 constexpr int kFlipY = 1;
 
-// Scene-graph renderer that presents mpv frames (DESIGN.md §19.3).
-//
-// QQuickFramebufferObject allocates an FBO sized to this item (device pixels),
-// binds it, and invokes render() on the render thread inside the Qt Quick
-// render pass. Because mpv renders with viewport (0,0,w,h) of the FBO it is
-// given, the FBO MUST be the item-sized one — never the window framebuffer.
-// Passing the window FBO with the item's dimensions (the previous defect) made
-// mpv draw an item-sized rectangle at the WINDOW's bottom-left (the PLAY-VIS-001
-// purple region). Qt now composites this FBO at the item's rect, so frames stay
-// inside the Stage, and Qt handles scissor/clip/DPR/resize for us.
 class VideoRenderer : public QQuickFramebufferObject::Renderer {
 public:
-    ~VideoRenderer() override = default;
-
     void synchronize(QQuickFramebufferObject* item) override
     {
         auto* surface = static_cast<VideoSurfaceItem*>(item);
-        item_ = surface;
+        surface_ = surface;
         backend_ = surface->backend();
+        updateTarget_ = surface->updateTarget();
+        freePending_ = surface->renderContextFreePending();
     }
 
     void render() override
     {
-        if (item_ == nullptr || backend_ == nullptr)
+        if (freePending_ && freePending_->load()) {
+            ctx_ = nullptr;
+            return;
+        }
+        if (surface_.isNull() || backend_.isNull())
             return;
 
         QOpenGLContext* current = QOpenGLContext::currentContext();
         if (current == nullptr)
-            return; // not an OpenGL render pass
+            return;
 
         if (ctx_ == nullptr) {
-            // Create mpv's render context on the render thread with the GL
-            // context current (the only valid place for it).
             ctx_ = backend_->renderContext();
             if (ctx_ != nullptr) {
-                mpv_render_context_set_update_callback(ctx_, onMpvUpdate, item_);
-                // Marshaled to the GUI thread: PlaybackManager releases a
-                // pending load on this signal (vo=libmpv aborts early loads).
-                QMetaObject::invokeMethod(item_, "onRenderContextReady",
+                backend_->setRenderGlContext(current);
+                mpv_render_context_set_update_callback(ctx_, onMpvUpdate,
+                                                       updateTarget_.get());
+                QMetaObject::invokeMethod(surface_.data(), "onRenderContextReady",
                                           Qt::QueuedConnection);
             }
         }
-        if (ctx_ == nullptr)
+        if (ctx_ == nullptr || (freePending_ && freePending_->load()))
             return;
 
         QOpenGLFramebufferObject* fbo = framebufferObject();
-        if (fbo == nullptr)
+        if (fbo == nullptr || fbo->width() <= 0 || fbo->height() <= 0)
             return;
-        const int w = fbo->width();
-        const int h = fbo->height();
-        if (w <= 0 || h <= 0)
-            return;
-
-        QOpenGLFunctions* gl = current->functions();
 
         GLint fboId = 0;
-        gl->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fboId);
-
+        current->functions()->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fboId);
         mpv_opengl_fbo mpvFbo{};
         mpvFbo.fbo = static_cast<int>(fboId);
-        mpvFbo.w = w;   // the FBO's real size (not the window's)
-        mpvFbo.h = h;
-
+        mpvFbo.w = fbo->width();
+        mpvFbo.h = fbo->height();
         int flipY = kFlipY;
         mpv_render_param params[] = {
             {MPV_RENDER_PARAM_OPENGL_FBO, &mpvFbo},
@@ -85,45 +73,140 @@ public:
             {MPV_RENDER_PARAM_INVALID, nullptr},
         };
         mpv_render_context_render(ctx_, params);
-        // Tell mpv the frame was presented so it can pace/release it.
         mpv_render_context_report_swap(ctx_);
-        item_->noteFrameRendered();
+        surface_->noteFrameRendered();
     }
 
 private:
-    // mpv calls this from its own thread when a new frame is ready. Qt GUI
-    // objects must not be touched off the GUI thread, so the repaint is
-    // marshaled across (a destroyed item becomes a no-op via QPointer).
     static void onMpvUpdate(void* userData)
     {
-        QPointer<VideoSurfaceItem> item(static_cast<VideoSurfaceItem*>(userData));
-        if (item)
-            QMetaObject::invokeMethod(item.data(), "update", Qt::QueuedConnection);
+        auto* target = static_cast<MpvUpdateTarget*>(userData);
+        if (target == nullptr)
+            return;
+        std::lock_guard<std::mutex> lock(target->mutex);
+        if (target->surface)
+            QMetaObject::invokeMethod(target->surface.data(), "update",
+                                      Qt::QueuedConnection);
     }
 
-    VideoSurfaceItem* item_ = nullptr;
-    MpvBackend* backend_ = nullptr;
+    QPointer<VideoSurfaceItem> surface_;
+    QPointer<MpvBackend> backend_;
+    std::shared_ptr<MpvUpdateTarget> updateTarget_;
+    std::shared_ptr<std::atomic<bool>> freePending_;
     mpv_render_context* ctx_ = nullptr;
+};
+
+class ContextFreeJob : public QRunnable {
+public:
+    ContextFreeJob(mpv_render_context* ctx, QPointer<VideoSurfaceItem> item,
+                   QPointer<MpvBackend> backend,
+                   std::shared_ptr<MpvUpdateTarget> updateTarget,
+                   std::shared_ptr<std::atomic<bool>> freePending,
+                   QOpenGLContext* ownerContext)
+        : ctx_(ctx), item_(item), backend_(backend),
+          updateTarget_(std::move(updateTarget)), freePending_(std::move(freePending)),
+          ownerContext_(ownerContext) {}
+
+    void run() override
+    {
+        if (ownerContext_ == nullptr || QOpenGLContext::currentContext() != ownerContext_) {
+            qWarning("mpv: creating GL context is not current; render context left to process exit");
+            return;
+        }
+
+        freePending_->store(true);
+        mpv_render_context_set_update_callback(ctx_, nullptr, nullptr);
+        mpv_render_context_free(ctx_);
+        if (!backend_.isNull())
+            backend_->contextFreed(ctx_);
+
+        if (!item_.isNull())
+            QMetaObject::invokeMethod(item_.data(), "onRenderContextFreed",
+                                      Qt::QueuedConnection);
+        if (!backend_.isNull())
+            QMetaObject::invokeMethod(backend_.data(), "finishShutdown",
+                                      Qt::QueuedConnection);
+    }
+
+private:
+    mpv_render_context* ctx_ = nullptr;
+    QPointer<VideoSurfaceItem> item_;
+    QPointer<MpvBackend> backend_;
+    std::shared_ptr<MpvUpdateTarget> updateTarget_;
+    std::shared_ptr<std::atomic<bool>> freePending_;
+    QOpenGLContext* ownerContext_ = nullptr;
 };
 
 } // namespace
 
-VideoSurfaceItem::VideoSurfaceItem(QQuickItem* parent) : QQuickFramebufferObject(parent)
+VideoSurfaceItem::VideoSurfaceItem(QQuickItem* parent)
+    : QQuickFramebufferObject(parent),
+      updateTarget_(std::make_shared<MpvUpdateTarget>()),
+      renderContextFreePending_(std::make_shared<std::atomic<bool>>(false))
 {
-    // The FBO must track this item's size so mpv always renders into a
-    // correctly sized target (including after resize / DPR changes).
     setTextureFollowsItemSize(true);
 }
 
-VideoSurfaceItem::~VideoSurfaceItem() = default;
-
-void VideoSurfaceItem::setBackend(MpvBackend* b)
+VideoSurfaceItem::~VideoSurfaceItem()
 {
-    if (backend_ != b) {
-        backend_ = b;
-        emit backendChanged();
-        update();
+    if (updateTarget_) {
+        std::lock_guard<std::mutex> lock(updateTarget_->mutex);
+        updateTarget_->surface.clear();
     }
+    if (backend_ && backend_->surface() == this)
+        backend_->setSurface(nullptr);
+}
+
+void VideoSurfaceItem::setBackend(MpvBackend* backend)
+{
+    if (backend_ == backend)
+        return;
+
+    if (updateTarget_) {
+        std::lock_guard<std::mutex> lock(updateTarget_->mutex);
+        if (updateTarget_->surface == this)
+            updateTarget_->surface.clear();
+    }
+
+    if (backend_ && backend_->surface() == this)
+        backend_->setSurface(nullptr);
+
+    backend_ = backend;
+    if (backend_) {
+        updateTarget_ = backend_->updateTarget();
+        {
+            std::lock_guard<std::mutex> lock(updateTarget_->mutex);
+            updateTarget_->surface = this;
+        }
+        backend_->setSurface(this);
+    } else {
+        updateTarget_ = std::make_shared<MpvUpdateTarget>();
+    }
+
+    emit backendChanged();
+    update();
+}
+
+void VideoSurfaceItem::scheduleRenderContextFree(mpv_render_context* ctx)
+{
+    if (ctx == nullptr)
+        return;
+
+    renderContextFreePending_->store(true);
+    mpv_render_context_set_update_callback(ctx, nullptr, nullptr);
+
+    QQuickWindow* window = this->window();
+    if (window == nullptr) {
+        qWarning("VideoSurfaceItem: no window; cannot free the mpv render context");
+        return;
+    }
+
+    QPointer<MpvBackend> backend = backend_;
+    QOpenGLContext* ownerContext = backend ? backend->renderGlContext() : nullptr;
+    window->scheduleRenderJob(
+        new ContextFreeJob(ctx, QPointer<VideoSurfaceItem>(this), backend,
+                           updateTarget_, renderContextFreePending_, ownerContext),
+        QQuickWindow::BeforeSynchronizingStage);
 }
 
 void VideoSurfaceItem::onRenderContextReady()
@@ -133,6 +216,13 @@ void VideoSurfaceItem::onRenderContextReady()
         emit videoActiveChanged();
     }
     emit renderContextReady();
+}
+
+void VideoSurfaceItem::onRenderContextFreed()
+{
+    videoActive_ = false;
+    emit videoActiveChanged();
+    emit renderContextFreed();
 }
 
 QQuickFramebufferObject::Renderer* VideoSurfaceItem::createRenderer() const

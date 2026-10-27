@@ -1,4 +1,5 @@
 #include "mpv_backend.hpp"
+#include "video_surface.hpp"
 
 #include <clocale>
 #include <mpv/client.h>
@@ -19,39 +20,35 @@ public:
 
 MpvBackend::MpvBackend(QObject* parent) : QObject(parent) {}
 
-MpvBackend::~MpvBackend() {
+MpvBackend::~MpvBackend()
+{
     shutdown();
 }
 
-// OpenGL proc-address callback required by mpv_render_context_create.
-static void* qgMpvGlGetProcAddress(void*, const char* name) {
+static void* qgMpvGlGetProcAddress(void*, const char* name)
+{
     QOpenGLContext* ctx = QOpenGLContext::currentContext();
-    if (!ctx) return nullptr;
+    if (!ctx)
+        return nullptr;
     return reinterpret_cast<void*>(ctx->getProcAddress(QByteArray(name)));
 }
 
-void MpvBackend::createHandle() {
-    if (handle_) return;
+void MpvBackend::createHandle()
+{
+    if (handle_ || shuttingDown_)
+        return;
 
-    // libmpv requires the C numeric locale: mpv_create() returns NULL when
-    // LC_NUMERIC is not "C" (e.g. en_US.UTF-8), and Qt sets the process locale
-    // from the environment on startup. Force LC_NUMERIC=C before creating the
-    // handle (DESIGN.md §19.1 one-handle policy; see DECISIONS.md 2026-10-09).
     std::setlocale(LC_NUMERIC, "C");
-
     handle_ = mpv_create();
     if (!handle_) {
         qWarning() << "MpvBackend: mpv_create() returned null";
         return;
     }
 
-    // Essential options
     mpv_set_option_string(handle_, "vo", "libmpv");
     mpv_set_option_string(handle_, "hwdec", "auto-safe");
     mpv_set_option_string(handle_, "keep-open", "yes");
     mpv_set_option_string(handle_, "ytdl", "no");
-
-    // Wakeup callback marshaled to Qt thread
     mpv_set_wakeup_callback(handle_, wakeupCallback, this);
 
     if (mpv_initialize(handle_) < 0) {
@@ -60,9 +57,8 @@ void MpvBackend::createHandle() {
         handle_ = nullptr;
         return;
     }
+    handleInitialized_ = true;
 
-    // Observe the properties the TransportBar/session mirror (DESIGN.md §8.2,
-    // §19.2). Property-change events are routed to Qt signals in event() below.
     struct ObserveSpec { const char* name; mpv_format format; };
     static const ObserveSpec kObserved[] = {
         {"pause", MPV_FORMAT_FLAG},
@@ -74,81 +70,85 @@ void MpvBackend::createHandle() {
         {"volume", MPV_FORMAT_DOUBLE},
         {"mute", MPV_FORMAT_FLAG},
     };
-    for (const ObserveSpec& spec : kObserved) {
+    for (const ObserveSpec& spec : kObserved)
         mpv_observe_property(handle_, 0, spec.name, spec.format);
-    }
 }
 
-void MpvBackend::wakeupCallback(void* userData) {
+void MpvBackend::wakeupCallback(void* userData)
+{
     auto* self = static_cast<MpvBackend*>(userData);
     QCoreApplication::postEvent(self, new MpvIdleEvent());
 }
 
-bool MpvBackend::event(QEvent* ev) {
-    if (ev->type() == MpvIdleEvent::kType) {
-        // Drain mpv events on the Qt thread (rendering itself is scene-graph
-        // driven; here we only publish state to the session — DESIGN.md §19.2).
-        while (handle_) {
-            mpv_event* e = mpv_wait_event(handle_, 0);
-            if (e->event_id == MPV_EVENT_NONE) break;
+bool MpvBackend::event(QEvent* ev)
+{
+    if (ev->type() != MpvIdleEvent::kType)
+        return QObject::event(ev);
 
-            switch (e->event_id) {
-            case MPV_EVENT_PROPERTY_CHANGE: {
-                auto* prop = static_cast<mpv_event_property*>(e->data);
-                if (prop == nullptr || prop->name == nullptr) break;
-                QVariant value;
-                if (prop->data != nullptr) {
-                    switch (prop->format) {
-                    case MPV_FORMAT_FLAG:
-                        value = (*static_cast<int*>(prop->data) != 0);
-                        break;
-                    case MPV_FORMAT_DOUBLE:
-                        value = *static_cast<double*>(prop->data);
-                        break;
-                    case MPV_FORMAT_INT64:
-                        value = static_cast<qlonglong>(*static_cast<int64_t*>(prop->data));
-                        break;
-                    case MPV_FORMAT_STRING: {
-                        const char* raw = *static_cast<char**>(prop->data);
-                        if (raw != nullptr) value = QString::fromUtf8(raw);
-                        break;
-                    }
-                    default:
-                        break;
-                    }
+    while (handle_) {
+        mpv_event* e = mpv_wait_event(handle_, 0);
+        if (e->event_id == MPV_EVENT_NONE)
+            break;
+
+        switch (e->event_id) {
+        case MPV_EVENT_PROPERTY_CHANGE: {
+            auto* prop = static_cast<mpv_event_property*>(e->data);
+            if (prop == nullptr || prop->name == nullptr)
+                break;
+            QVariant value;
+            if (prop->data != nullptr) {
+                switch (prop->format) {
+                case MPV_FORMAT_FLAG:
+                    value = (*static_cast<int*>(prop->data) != 0);
+                    break;
+                case MPV_FORMAT_DOUBLE:
+                    value = *static_cast<double*>(prop->data);
+                    break;
+                case MPV_FORMAT_INT64:
+                    value = static_cast<qlonglong>(*static_cast<int64_t*>(prop->data));
+                    break;
+                case MPV_FORMAT_STRING: {
+                    const char* raw = *static_cast<char**>(prop->data);
+                    if (raw != nullptr)
+                        value = QString::fromUtf8(raw);
+                    break;
                 }
-                emit propertyChanged(QString::fromUtf8(prop->name), value);
-                break;
+                default:
+                    break;
+                }
             }
-            case MPV_EVENT_FILE_LOADED:
-                emit fileLoaded();
-                break;
-            case MPV_EVENT_END_FILE: {
-                auto* end = static_cast<mpv_event_end_file*>(e->data);
-                const int reason = end != nullptr ? end->reason : 0;
-                const int error = end != nullptr ? end->error : 0;
-                emit endFile(reason, error);
-                break;
-            }
-            default:
-                break;
-            }
+            emit propertyChanged(QString::fromUtf8(prop->name), value);
+            break;
         }
-        return true;
+        case MPV_EVENT_FILE_LOADED:
+            emit fileLoaded();
+            break;
+        case MPV_EVENT_END_FILE: {
+            auto* end = static_cast<mpv_event_end_file*>(e->data);
+            emit endFile(end != nullptr ? end->reason : 0,
+                         end != nullptr ? end->error : 0);
+            break;
+        }
+        default:
+            break;
+        }
     }
-    return QObject::event(ev);
+    return true;
 }
 
-mpv_handle* MpvBackend::handle() {
-    if (!handle_) {
+mpv_handle* MpvBackend::handle()
+{
+    if (!handle_)
         createHandle();
-    }
     return handle_;
 }
 
-mpv_render_context* MpvBackend::renderContext() {
-    if (!handle_) return nullptr;
-    if (renderCtxCreated_) return renderCtx_;
+mpv_render_context* MpvBackend::renderContext()
+{
+    if (shuttingDown_ || !handle_)
+        return nullptr;
+    if (renderCtxCreated_)
+        return renderCtx_;
 
     mpv_opengl_init_params glParams = {
         .get_proc_address = qgMpvGlGetProcAddress,
@@ -168,18 +168,69 @@ mpv_render_context* MpvBackend::renderContext() {
     return renderCtx_;
 }
 
-bool MpvBackend::initialized() const {
-    return handle_ != nullptr;
+bool MpvBackend::initialized() const
+{
+    return handle_ != nullptr && handleInitialized_;
 }
 
-void MpvBackend::shutdown() {
-    if (renderCtx_) {
-        mpv_render_context_free(renderCtx_);
-        renderCtx_ = nullptr;
-        renderCtxCreated_ = false;
+void MpvBackend::setSurface(VideoSurfaceItem* surface)
+{
+    surface_ = surface;
+}
+
+VideoSurfaceItem* MpvBackend::surface() const
+{
+    return surface_.data();
+}
+
+void MpvBackend::shutdown()
+{
+    if (shutdownPending_ || shuttingDown_)
+        return;
+    shuttingDown_ = true;
+
+    if (renderCtx_ == nullptr) {
+        // No render context depends on the handle, so immediate teardown is safe.
+        finishShutdown();
+        return;
     }
-    if (handle_) {
+
+    mpv_render_context_set_update_callback(renderCtx_, nullptr, nullptr);
+
+    VideoSurfaceItem* surface = surface_.data();
+    if (surface != nullptr && surface->window() != nullptr) {
+        mpv_render_context* ctx = renderCtx_;
+        transferredRenderCtx_.store(ctx);
+        renderCtx_ = nullptr;
+        shutdownPending_ = true;
+        QObject::connect(surface, &VideoSurfaceItem::renderContextFreed,
+                         this, &MpvBackend::finishShutdown,
+                         Qt::UniqueConnection);
+        surface->scheduleRenderContextFree(ctx);
+        return;
+    }
+
+    qWarning("MpvBackend: no render thread available; deferring mpv teardown to exit");
+    // Preserve the handle/context. Freeing without the creating GL context or
+    // terminating the handle first violates libmpv's lifecycle contract.
+}
+
+void MpvBackend::finishShutdown()
+{
+    if (renderCtx_ != nullptr || transferredRenderCtx_.load() != nullptr) {
+        qWarning("MpvBackend: refusing to terminate mpv before render-context cleanup completes");
+        return;
+    }
+
+    if (handle_ != nullptr) {
+        if (handleInitialized_)
+            mpv_set_wakeup_callback(handle_, nullptr, nullptr);
         mpv_terminate_destroy(handle_);
         handle_ = nullptr;
     }
+    handleInitialized_ = false;
+    renderCtxCreated_ = false;
+    renderGlContext_.store(nullptr);
+    shutdownPending_ = false;
+    shuttingDown_ = false;
 }
