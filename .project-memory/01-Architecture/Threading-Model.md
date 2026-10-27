@@ -124,9 +124,48 @@ PriorityPool::PriorityPool(int maxThreads)
     : m_pool(maxThreads)  // QThreadPool with reserved threads per priority
 ```
 
-- `WorkerPools::io()` — static accessor for I/O pool
-- `WorkerPools::cpuMedia()` — static accessor for CPU/Media pool
-- `submitTask(pool, priority, token, context, work, deliver)` — unified submission
+- `WorkerPools::io()` — static accessor for the I/O pool
+- `WorkerPools::cpuMedia()` — static accessor for the CPU/Media pool
+- `submitTask(pool, priority, token, receiver, work, deliver)` — unified submission
+- `postToGui(guard, fn)` — guarded GUI-thread hop, used directly by worker code
+  that produces incremental results (e.g. `RecursiveSearchService::walk`)
+
+### Result delivery is receiver-lifetime-safe
+
+`submitTask()` must be called from the GUI thread. It builds a `QPointer<QObject>`
+guard for `receiver` **there**, and records the null-receiver case separately;
+pool threads only copy/query the guard (atomic reference counts — never a
+dereference). Results are queued through one process-lifetime GUI-thread hub and
+the guard is re-checked on the GUI thread immediately before `deliver()` runs, so
+a receiver destroyed while a result was in flight is discarded instead of being
+delivered. `work` never touches GUI state or the receiver; a null `receiver` still
+means "deliver on the worker thread". `receiver` is a lifetime token only — it
+does **not** select the delivery thread. See
+[[worker-pool-receiver-use-after-free]].
+
+### File operations are an asynchronous facade (AUD-003, 2026-10-25)
+
+`FileOperationsService`'s mutating `Q_INVOKABLE`s (`rename`, `move`, `copy`,
+`deletePermanently`) do **not** do I/O on the calling thread. Each one submits
+its `*Sync` helper to `WorkerPools::io()` at `TaskPriority::Normal` through
+`submitTask(…, this, work, deliver)`, so:
+
+- `work` runs the whole directory walk / copy / delete on a pool thread and never
+  touches GUI state;
+- `deliver` (`emitFinished` → `operationFinished`) runs on the GUI thread, after
+  the event loop turns, and only while the service is still alive;
+- the `Q_INVOKABLE` itself returns in microseconds — measured pre-fix: **818 ms**
+  of GUI-thread block for a 3 MB / 400-file copy (`qg_file_ops_async`).
+
+Consequence for callers: a result is observed *after* the event loop turns, in
+**completion** order (not request order), so per-request state must be correlated
+with the result it belongs to. `ActionsController`/QML already decide before
+dispatching (`targetPathForRename`/`pathExists`), so they needed no change.
+
+`reveal`/`openWith` still launch synchronously on the GUI thread (blocking
+`QProcess`), and `TrashService` is still called inline by
+`ActionsController::trash` — both out of AUD-003's scope. Progress/cancellation
+is FIX-FO-02. See [[2026-10-25-fix-aud-003-file-ops-async]].
 
 ## Performance Characteristics
 
@@ -136,4 +175,5 @@ PriorityPool::PriorityPool(int maxThreads)
 | Thumbnail extraction (1080p) | CPU/Media | ~50-100ms | After frame decode |
 | Media probe (duration) | CPU/Media | ~10-50ms | After format open |
 | Recursive search (100k files) | I/O | ~2-5s | At directory boundaries |
-| Move 1000 files | I/O | ~1-2s | Per-file chunk |
+| Move 1000 files | I/O | ~1-2s | None yet (FIX-FO-02) |
+| Directory copy (3 MB / 400 files) | I/O | ~0.8s | None yet (FIX-FO-02) |

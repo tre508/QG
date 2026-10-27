@@ -9,6 +9,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtTest
+import QtQuick.Window
 import qg
 
 TestCase {
@@ -303,5 +304,121 @@ TestCase {
         // After entering Cinema, stage.forceActiveFocus() is called by the
         // Connections handler (line 784), so stage.activeFocus should be true.
         compare(stage.activeFocus, true, "Stage holds focus in Cinema")
+    }
+
+    // --- AUD-010: the window-state half of Cinema (§4.2/§4.5/§25.7) ---------
+    //
+    // The window state is asserted through the `visibility` *property* rather
+    // than through physical screen dimensions: under offscreen the platform
+    // emulates the state change, and on a headless X server there is no window
+    // manager to apply fullscreen geometry, but in both cases Qt records the
+    // requested state — which is what §4.2.1/§4.5 specify.
+
+    function test_cinemaFullscreensTheExistingWindowAndRestoresIt() {
+        const b = build()
+        verify(b.shell !== null)
+        const beforeVisibility = b.shell.visibility
+        const beforeWidth = b.shell.width
+        const beforeHeight = b.shell.height
+        verify(beforeVisibility !== Window.FullScreen, "not fullscreen before Cinema")
+
+        b.pc.enterCinema()
+        wait(50)
+        compare(b.shell.cinema, true)
+        compare(b.shell.visibility, Window.FullScreen,
+                "Cinema fullscreens the existing window (§4.2.1)")
+
+        b.pc.exitCinema()
+        wait(50)
+        compare(b.shell.cinema, false)
+        verify(b.shell.visibility !== Window.FullScreen,
+               "leaving Cinema must not stay fullscreen (§4.5)")
+        compare(b.shell.visibility, beforeVisibility, "previous window state restored")
+        compare(b.shell.width, beforeWidth, "pre-Cinema geometry restored")
+        compare(b.shell.height, beforeHeight, "pre-Cinema geometry restored")
+    }
+
+    function test_cinemaRestoresAMaximizedWindowState() {
+        const b = build()
+        b.shell.visibility = Window.Maximized
+        wait(50)
+        const maximized = b.shell.visibility
+        verify(maximized !== Window.FullScreen, "maximized is not fullscreen")
+
+        b.pc.enterCinema()
+        wait(50)
+        compare(b.shell.visibility, Window.FullScreen, "Cinema is fullscreen")
+        b.pc.exitCinema()
+        wait(50)
+        compare(b.shell.visibility, maximized, "maximized state restored (§4.5)")
+    }
+
+    function test_cinemaNeverRestoresAFullscreenItDidNotCreate() {
+        const b = build()
+        // Cinema first observes a maximized state — the last non-fullscreen state
+        // it is allowed to restore.
+        b.shell.visibility = Window.Maximized
+        wait(50)
+        b.pc.enterCinema()
+        wait(50)
+        b.pc.exitCinema()
+        wait(50)
+        compare(b.shell.visibility, Window.Maximized, "the observed maximized state is restored")
+
+        // A fullscreen the app did not create (e.g. the window manager) plus a
+        // second round-trip: fullscreen must never be remembered or restored.
+        b.shell.visibility = Window.FullScreen
+        wait(50)
+        b.pc.enterCinema()
+        wait(50)
+        compare(b.shell.visibility, Window.FullScreen)
+        b.pc.exitCinema()
+        wait(50)
+        verify(b.shell.visibility !== Window.FullScreen,
+               "a pre-existing fullscreen must not be restored as fullscreen")
+        compare(b.shell.visibility, Window.Maximized,
+                "the last observed windowed/maximized state returns")
+    }
+
+    function test_cinemaExitFromAPreExistingFullscreenFallsBackToWindowed() {
+        // Cinema's entry guard never remembers FullScreen, so when the very first
+        // entry happens while the window is already fullscreen there is no
+        // observed windowed/maximized state to restore: the fallback is Windowed.
+        const b = build()
+        b.shell.visibility = Window.FullScreen
+        wait(50)
+        b.pc.enterCinema()
+        wait(50)
+        b.pc.exitCinema()
+        wait(50)
+        verify(b.shell.visibility !== Window.FullScreen,
+               "never left stuck fullscreen by a fullscreen it did not create")
+        compare(b.shell.visibility, Window.Windowed,
+                "no observed windowed/maximized state -> Windowed")
+    }
+
+    function test_cinemaWindowStateIsStableAcrossRepeatedToggles() {
+        const b = build()
+        const beforeVisibility = b.shell.visibility
+        for (let i = 0; i < 3; ++i) {
+            b.pc.enterCinema()
+            wait(50)
+            compare(b.shell.visibility, Window.FullScreen, "entry #" + i + " fullscreens")
+            b.pc.exitCinema()
+            wait(50)
+            compare(b.shell.visibility, beforeVisibility, "exit #" + i + " restores")
+        }
+    }
+
+    function test_playbackStateIsUntouchedByTheWindowStateChange() {
+        const b = build()
+        const sessionBefore = b.pc.currentSession
+        b.pc.enterCinema()
+        wait(50)
+        b.pc.exitCinema()
+        wait(50)
+        compare(b.pc.stopCalls, 0, "the transition never stops playback (§4.2.6)")
+        compare(b.pc.currentSession, sessionBefore, "the session object is unchanged")
+        compare(b.pc.playing, true, "playback continues")
     }
 }

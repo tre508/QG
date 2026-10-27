@@ -31,10 +31,11 @@ source:
 |---------|------|--------|
 | `qg_qml` | 4 pre-existing subtests | `CardActions::test_keyboardDispatchesFocusedCardActions`, `ContentView::test_focusAndSelectionAreDistinct`, `Keyboard::test_noDuplicateEnabledSequences` (`Alt+Left`), `TransportBar::test_reflectsPlaybackState` — baseline failures, unrelated to recent work |
 
-`qg_keyboard` passed in both runs. It remains **intermittently** crash-prone: a
-use-after-free in worker-pool delivery (`src/workers/tasks.cpp:81`) makes teardown
-SEGFAULT in roughly 4 % of runs (1 of 25 sequential, 1 of 14 under gdb). See
-[[worker-pool-receiver-use-after-free]].
+`qg_keyboard` passed in both runs. Its intermittent teardown SEGFAULT (a
+use-after-free in worker-pool delivery, ~4 % of runs) was **fixed on
+2026-10-25** — see [[worker-pool-receiver-use-after-free]] and
+[[2026-10-25-fix-worker-delivery-uaf]]. This document stays frozen at the
+2026-10-22 run.
 
 ### QML suite (same day)
 
@@ -51,6 +52,9 @@ FIX-UI-004 and FIX-VIS-010 added their suites.
 | `qg_mounts` / `qg_places_model` | 14/14 / 14/14 | Mount classification by identity; sidebar roles |
 | `qg_thumb_delivery` | 10/10 | Real MP4+MKV: role is an `Image.source` URL, freedesktop cache hit skips decode, failures explicit, folder rows never extracted ([[video-thumbnails-not-rendered]]) |
 | `tst_videocard` | 13/13 | Delegate paints a URL thumbnail (`status === Ready`, `paintedWidth > 0`) |
+| `render_probe` + `probe` (scratch instruments, 2026-10-25) | 9/9 render checks, red-on-HEAD control | AUD-004/FIX-SEL-01: focus ring (cyan `#38E1E1`) and selection border (blue `#4DA3FF`) render on the intended cards and follow the state; the pre-fix binding shape renders nothing on the same data ([[2026-10-25-fix-aud-004-selection-focus]]) |
+| `aud009_reflow` (scratch harness, 2026-10-25) | 6/6, 40 entries at 1200×620 | AUD-009/FIX-STAGE-01: the real Stage (372 px) reserves `reservedTop` 384 = `stage.height + Theme.space3`; `grid.y == pad + reservedTop == 408`; row 0's first card maps to exactly `reservedTop + pad` (fully below the Stage); the last card is reachable with no part under the Stage; closing the Stage releases the inset and preserves `contentY` 1400 + the selection; Cinema reserves nothing ([[2026-10-25-fix-aud-009-stage-reflow]]) |
+| `qg_qml` baseline re-measured 2026-10-25 | 200 passed / **8** failed | Identical before and after FIX-SEL-01 **and** FIX-STAGE-01; the extra four over the historical record are `Cinema`/`Keyboard` "editor focus detected" subtests |
 
 ### Real-application evidence (Xvfb, 2026-10-22)
 

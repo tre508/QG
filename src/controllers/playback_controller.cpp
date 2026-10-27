@@ -4,6 +4,7 @@
 #include "playback/playback_session.hpp"
 #include "models/folder_model.hpp"
 
+#include <QFileInfo>
 #include <QVector>
 
 namespace {
@@ -131,6 +132,7 @@ void PlaybackController::play(const QString& path, const QString& identity)
     }
     manager_->openWithIdentity(path, identity, start);
     currentSession_ = manager_->session();
+    attachSession();
     refreshReel();
     emit playingChanged();
     emit currentSessionChanged();
@@ -153,6 +155,7 @@ void PlaybackController::playCurrent()
                                                   modelWatched(entry.identity));
     manager_->openWithIdentity(entry.path, entry.identity, start);
     currentSession_ = manager_->session();
+    attachSession();
     refreshReel();
     emit playingChanged();
     emit currentSessionChanged();
@@ -293,9 +296,28 @@ void PlaybackController::onModelStructureChanged()
         return;
 
     const QString identity = currentIdentity();
-    // Did the playing file leave the model entirely? Then playback must stop:
-    // its path no longer exists (rename/removal/navigation — §17.5).
-    const bool playingGone = !identity.isEmpty()
+
+    // Browsing to a different folder does NOT end playback (§13.1: "playback
+    // continues while you browse elsewhere"). Only a model that still represents
+    // the session's own folder can prove the file disappeared.
+    const QString sessionPath = currentSession_ != nullptr ? currentSession_->path() : QString();
+    const QString sessionFolder =
+        sessionPath.isEmpty() ? QString() : QFileInfo(sessionPath).absolutePath();
+    const bool sameFolder = !sessionFolder.isEmpty()
+                            && folderModel_->folderPath() == sessionFolder;
+
+    // A live session owns its ordered context: the Reel and Prev/Next traverse
+    // the folder the session plays from (§9.1 "ordered playback items", §10.2
+    // "the folder's ordered video list", §19.4), not whatever folder is on
+    // screen. A reset from another folder must therefore leave the context, the
+    // Reel and the session untouched — rebuilding here would silently replace
+    // the playing folder's list with the browsed folder's rows. Browsing back to
+    // the session's folder rebuilds it and re-anchors the current item.
+    if (hasActiveSession() && !sameFolder) {
+        return;
+    }
+
+    const bool playingGone = sameFolder && !identity.isEmpty()
                              && folderModel_->indexOfIdentity(identity) < 0;
 
     context_->build(folderModel_, playingGone ? QString() : identity,
@@ -357,4 +379,48 @@ bool PlaybackController::modelWatched(const QString& identity) const
         return false;
     const qg::Entry* entry = folderModel_->entryAt(folderModel_->indexOfIdentity(identity));
     return entry != nullptr && entry->watched;
+}
+
+void PlaybackController::attachSession()
+{
+    if (currentSession_ == nullptr) {
+        return;
+    }
+    // One connection per acquisition; the session is a process singleton, so a
+    // duplicate connection would advance twice per EOF.
+    disconnect(currentSession_, &PlaybackSession::stateChanged,
+               this, &PlaybackController::onSessionStateChanged);
+    connect(currentSession_, &PlaybackSession::stateChanged,
+            this, &PlaybackController::onSessionStateChanged);
+    emit playingChanged();
+    emit currentSessionChanged();
+}
+
+void PlaybackController::onSessionStateChanged(PlaybackSession::State state)
+{
+    // The transport mirrors `playing`, so it must be re-read whenever mpv
+    // changes the state behind our back (pause, EOF, error, external stop).
+    emit playingChanged();
+
+    if (state != PlaybackSession::Ended || !autoAdvance_) {
+        return;
+    }
+    // Continuous playback (§4.6): stay in Stage/Cinema, load the next item.
+    if (context_ != nullptr && context_->step(1)) {
+        playCurrent();
+    } else {
+        emit endOfFolder();
+        stop();
+    }
+}
+
+bool PlaybackController::autoAdvance() const { return autoAdvance_; }
+
+void PlaybackController::setAutoAdvance(bool enabled)
+{
+    if (autoAdvance_ == enabled) {
+        return;
+    }
+    autoAdvance_ = enabled;
+    emit autoAdvanceChanged();
 }

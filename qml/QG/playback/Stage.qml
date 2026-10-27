@@ -265,4 +265,16 @@ Rectangle {
         onFullscreenRequested: stage.fullscreenRequested()
         onCloseRequested: stage.closeRequested()
     }
+
+    // A refused seek (non-seekable media, DESIGN.md playback §3.1): the manager
+    // has already restored the real position and owns the rule, so the bar only
+    // shows its amber affordance. `target: null` (no manager injected) is a valid
+    // no-op, so this stays safe when the Stage is used without a session.
+    Connections {
+        target: stage.playbackManager
+
+        function onSeekRejected() {
+            transport.flashSeekRejected()
+        }
+    }
 }

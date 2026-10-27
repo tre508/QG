@@ -38,6 +38,11 @@ public:
     QVariant data(const QModelIndex& index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
 
+    // Identity of a result row (AUD-004): recursive hits have no FolderModel row,
+    // so a Manifest selection needs the identity the model already carries.
+    // Empty when the walker could not resolve one.
+    Q_INVOKABLE QString identityAt(int row) const;
+
     // Replace the result set (model reset); tracking the query is presentation
     // bookkeeping so summaries can count recursive hits.
     void setResults(const QVector<RecursiveSearchResult>& results, const QString& query);

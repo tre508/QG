@@ -1,6 +1,9 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+// `Window.FullScreen` / `Window.Windowed`: the Cinema window-state transition
+// (playback §4.2/§4.5) reads and writes `visibility`, whose enum lives here.
+import QtQuick.Window
 
 import qg
 
@@ -38,6 +41,59 @@ ApplicationWindow {
     property var actionsController: null
     property var mountsController: null
     property var selectionState: null
+    // --- Selection accessors (AUD-004 / FIX-SEL-01) --------------------------
+    // SelectionState exposes selection/focus as *properties* so that a binding
+    // reading them re-evaluates when the selection changes; the previous
+    // invokable-only reads (`selectedCount()`) created no dependency, which is
+    // why the status strip and the context-menu title froze at their
+    // creation-time values. Reading the property here is what creates that
+    // dependency; an invokable-shaped double is still accepted.
+    function selectionCount() {
+        const s = window.selectionState
+        if (!s)
+            return 0
+        const v = s.selectedCount
+        return typeof v === "function" ? v() : ((v === undefined || v === null) ? 0 : v)
+    }
+    function selectionIds() {
+        const s = window.selectionState
+        if (!s)
+            return []
+        const v = s.selectedIdentities
+        if (typeof v === "function")
+            return v()
+        return (v === undefined || v === null) ? [] : v
+    }
+    // --- Search accessors (AUD-005 / FIX-SRCH-01) ---------------------------
+    // SearchController now owns `active`/`summary`/`resultCount` as *properties*
+    // (DESIGN.md §7.2). These read them, so the value used by the surface switch
+    // is the controller's, and still accept an invokable-shaped test double
+    // (the in-repo QML fixture declares `function summary()`).
+    function searchIsActive(fallback) {
+        const c = window.searchController
+        if (!c)
+            return fallback === true
+        const v = c.active
+        if (v === undefined || v === null)
+            return fallback === true
+        return v === true
+    }
+    function searchSummaryText(fallback) {
+        const c = window.searchController
+        if (c) {
+            const v = c.summary
+            if (typeof v === "string")
+                return v
+        }
+        return (fallback === undefined || fallback === null) ? "" : fallback
+    }
+    // The applied (debounced) query, owned by the controller.
+    function searchAppliedQuery() {
+        const c = window.searchController
+        if (!c || typeof c.query !== "function")
+            return ""
+        return c.query()
+    }
     // Central keyboard router (REMEDIATION-012 / D-11). Null in tests that do not
     // inject it; every shortcut no-ops safely when absent.
     property var keyboard: null
@@ -62,6 +118,10 @@ ApplicationWindow {
     // Reel visibility: auto-opens with playback, toggled with Ctrl+R, closed
     // with its ✕ (DESIGN.md §10.2).
     property bool reelVisible: false
+
+    // Window state to restore when Cinema exits (DESIGN.md playback §4.2/§4.5:
+    // fullscreen uses the existing window; exiting returns to the prior state).
+    property int windowedVisibility: Window.Windowed
 
     // --- Dialogs / feedback state (REMEDIATION-010) --------------------------
     property string pendingRenamePath: ""
@@ -196,11 +256,10 @@ ApplicationWindow {
 
     // Multi-selection state for the menu title + bulk-only verbs (DESIGN §11.2).
     readonly property int menuSelectionCount: {
-        if (window.selectionState && typeof window.selectionState.selectedCount === "function") {
-            const n = window.selectionState.selectedCount()
-            if (n > 0)
-                return n
-        }
+        const n = window.selectionCount()
+        if (n > 0)
+            return n
+        // The menu always acts on at least the focused row (§11.2).
         return 1
     }
 
@@ -315,8 +374,8 @@ ApplicationWindow {
         let paths = []
         let identities = []
         // Multi-selection: delete the full selected set (bulk verb, §11.4).
-        if (window.selectionState && window.selectionState.selectedCount() > 1 && window.folderModel) {
-            const ids = window.selectionState.selectedIdentities()
+        if (window.selectionCount() > 1 && window.folderModel) {
+            const ids = window.selectionIds()
             const total = window.folderModel.count
             for (let r = 0; r < total; ++r) {
                 const id = window.folderModel.identityAt(r)
@@ -565,6 +624,10 @@ ApplicationWindow {
 ContentView {
                     id: contentView
                     anchors.fill: parent
+                    // Reflow, don't overlay: the grid starts below the Stage
+                    // (DESIGN.md §3.4, playback §2.1.7, §2.2; AUD-009).
+                    reservedTop: (window.sessionActive && !window.cinema && stage.visible)
+                                 ? stage.height + Theme.space3 : 0
                     model: window.folderModel
                     recursiveModel: window.searchController ? window.searchController.recursiveResultsModel() : null
                     searchRecursive: window.searchController ? window.searchController.scopeRecursive() : false
@@ -630,6 +693,13 @@ ContentView {
                     onOverflowRequested: function (index, globalX, globalY) {
                         window.openContextMenu(index, globalX, globalY)
                     }
+                    // §7.4 / §25.4: the no-results "Clear search" is the same intent
+                    // as the field's ✕ — it clears the query, and the controller's
+                    // notification restores Browse. Routing it through the field
+                    // keeps SearchController the owner of the query lifecycle;
+                    // dropping the Manifest inside the view left the morph open and
+                    // the controller still active over a Browse grid.
+                    onSearchClearRequested: pathBar.clearSearchQuery()
                     onDropRequested: function (paths, targetDir, isMove) {
                         if (window.actionsController && paths && paths.length > 0) {
                             const dest = targetDir || (window.browserController && window.browserController.currentPath ? window.browserController.currentPath : "")
@@ -712,8 +782,13 @@ ContentView {
                 Stage {
                     id: stage
                     objectName: "stageRegion"
+                    // Inline Stage: a real element of the content flow (DESIGN.md
+                    // §3.4). ContentView reserves its height (`reservedTop`) so the
+                    // cards reflow beneath it rather than being covered; in Cinema
+                    // the Stage fills the window and the inset is irrelevant.
                     // Anchored top/left so the Stage computes its own width and
-                    // height (inline 60% cap vs. Cinema full-window).
+                    // height (inline 60% cap vs. Cinema full-window) from the
+                    // region — never from the inset, so no binding loop exists.
                     anchors.top: parent.top
                     anchors.left: parent.left
                     visible: window.sessionActive
@@ -834,12 +909,12 @@ ContentView {
                 id: statusStrip
                 anchors.fill: parent
                 // Multi-selection is now tracked via SelectionState (REM-013 / D-12, D-29).
-                selectedCount: window.selectionState ? window.selectionState.selectedCount() : 0
+                selectedCount: window.selectionCount()
                 selectedBytes: {
                     if (!window.selectionState || !window.folderModel)
                         return 0
                     let total = 0
-                    const ids = window.selectionState.selectedIdentities()
+                    const ids = window.selectionIds()
                     for (let i = 0; i < ids.length; ++i) {
                         let idx = -1
                         if (typeof window.folderModel.indexOfIdentity === "function") {
@@ -867,7 +942,7 @@ ContentView {
         target: window.searchController
 
         function onActiveChanged(active) {
-            if (active) {
+            if (window.searchIsActive(active)) {
                 // Give the summary its folder/sort context before it is emitted.
                 if (window.browserController) {
                     const folder = (window.browserController.folderName !== undefined)
@@ -878,15 +953,27 @@ ContentView {
                     window.searchController.setSortLabel(order)
                 }
                 contentView.enterManifest(window.searchProxy,
-                                          window.searchController.query())
+                                          window.searchAppliedQuery())
             } else {
                 contentView.exitManifest()
-                contentView.forceActiveFocus()
+                // §7.2: the first Esc only clears the query — the morph is still
+                // open, so the field must stay the typing target (otherwise the
+                // second Esc never reaches it and the field cannot leave). Focus
+                // returns to the browse view when the search is closed
+                // (Cancel, or the ✕-then-Esc path).
+                if (!pathBar.searchActive)
+                    contentView.forceActiveFocus()
             }
         }
 
         function onResultsChanged(summary) {
-            contentView.summaryText = summary
+            // Read both values from the controller's properties rather than from
+            // the signal argument alone. The no-results copy names the *applied*
+            // query, which the view only received once at enterManifest, so a
+            // query typed after the Manifest appeared would otherwise render
+            // stale copy ("No matches for "sun"" while the field reads "sunxyz").
+            contentView.summaryText = window.searchSummaryText(summary)
+            contentView.searchQuery = window.searchAppliedQuery()
         }
 
         function onScopeChanged() {
@@ -903,10 +990,21 @@ ContentView {
     Connections {
         target: window.playbackController
         function onCinemaActiveChanged() {
-            if (window.cinema)
+            if (window.cinema) {
+                // §4.2: fullscreen the existing window — never a new one.
+                if (window.visibility !== Window.FullScreen) {
+                    window.windowedVisibility = window.visibility
+                }
+                window.visibility = Window.FullScreen
                 stage.forceActiveFocus()
-            else
+                // §4.4: both overlays are visible on entry.
+                if (stage.wakeControls)
+                    stage.wakeControls()
+            } else {
+                window.visibility = (window.windowedVisibility === Window.FullScreen)
+                                    ? Window.Windowed : window.windowedVisibility
                 contentView.forceActiveFocus()
+            }
         }
         // The Reel opens with playback and closes when playback ends (§10.2).
         function onPlaybackStarted(path) { window.reelVisible = true }
@@ -963,7 +1061,7 @@ ContentView {
     // --- Clipboard / drag-drop keyboard actions (REM-014 / D-27) ---------------
     Shortcut { objectName: "kbCut"; sequence: "Ctrl+X"; enabled: !window.cinema && !window.textEditing && window.sessionActive; onActivated: {
         if (window.selectionState && window.actionsController) {
-            const ids = window.selectionState ? (window.selectionState.selectedIdentities ? window.selectionState.selectedIdentities() : []) : []
+            const ids = window.selectionIds()
             if (ids.length > 0) {
                 const path = contentView.pathForIndex(ids[0] ? ids[0] : -1)
                 if (path.length > 0) {
@@ -974,7 +1072,7 @@ ContentView {
     } }
     Shortcut { objectName: "kbCopy"; sequence: "Ctrl+C"; enabled: !window.cinema && !window.textEditing && window.sessionActive; onActivated: {
         if (window.selectionState && window.actionsController) {
-            const ids = window.selectionState ? (window.selectionState.selectedIdentities ? window.selectionState.selectedIdentities() : []) : []
+            const ids = window.selectionIds()
             if (ids.length > 0) {
                 const paths = []
                 for (let i = 0; i < ids.length; ++i) {

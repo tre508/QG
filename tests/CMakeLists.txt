@@ -540,6 +540,25 @@ add_test(NAME qg_transport_state
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_gl_test.sh $<TARGET_FILE:qg_transport_state_test>
 )
 
+# --- Seek policy: normalisation, consolidation, rejection (AUD-001) ----------
+# Headless: the seek dispatch is injected, so no render context or media is
+# needed to verify the policy DESIGN.md playback §3.1 specifies.
+add_executable(qg_seek_policy_test
+    unit/test_seek_policy.cpp
+)
+set_target_properties(qg_seek_policy_test PROPERTIES AUTOMOC ON)
+target_link_libraries(qg_seek_policy_test PRIVATE
+    qg_playback
+    qg_core
+    Qt6::Test
+    Qt6::Gui
+    qg_warnings
+)
+add_test(NAME qg_seek_policy COMMAND qg_seek_policy_test)
+set_tests_properties(qg_seek_policy PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+)
+
 # --- Ordered playback context (REMEDIATION-007 / D-07, D-24) -----------------
 add_executable(qg_playback_context_test
     unit/test_playback_context.cpp
@@ -668,6 +687,24 @@ target_link_libraries(qg_action_feedback_test PRIVATE
 )
 add_test(NAME qg_action_feedback COMMAND qg_action_feedback_test)
 set_tests_properties(qg_action_feedback PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+)
+
+# --- File operations on the I/O pool (AUD-003) -------------------------------
+# Headless: real temporary-directory fixtures, no display, no media needed. The
+# watchdog case measures GUI-thread block time while a real bulk copy runs.
+add_executable(qg_file_ops_async_test
+    unit/test_file_ops_async.cpp
+)
+set_target_properties(qg_file_ops_async_test PROPERTIES AUTOMOC ON)
+target_link_libraries(qg_file_ops_async_test PRIVATE
+    qg_core
+    Qt6::Test
+    Qt6::Gui
+    qg_warnings
+)
+add_test(NAME qg_file_ops_async COMMAND qg_file_ops_async_test)
+set_tests_properties(qg_file_ops_async PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
 

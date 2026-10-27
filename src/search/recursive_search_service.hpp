@@ -11,6 +11,7 @@
 // semantics do not apply).
 
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QVector>
 
@@ -53,6 +54,10 @@ public:
     // Begin a walk from `rootDir`. Batches + finished arrive on this object's
     // thread via queued delivery. A subsequent call cancels the previous walk.
     // Returns the walk's generation (use it to drop stale batches).
+    //
+    // The walk runs on the I/O pool and holds a lifetime guard for this object,
+    // so destroying the service while a walk is in flight drops the remaining
+    // batches instead of letting a worker touch freed memory.
     std::uint64_t start(const QString& query, const QString& rootDir,
                         const RecursiveSearchConfig& cfg = RecursiveSearchConfig());
 
@@ -65,7 +70,12 @@ signals:
     void finished(std::uint64_t generation, bool cancelled);
 
 private:
-    void walk(const QString& query, const QString& rootDir,
+    // Worker-thread body. `guard` and `token` are copies made on the GUI thread
+    // in start(): the walk never reads this object's members, so it cannot race
+    // with cancel() and cannot touch a destroyed service.
+    void walk(const QPointer<RecursiveSearchService>& guard,
+              const std::shared_ptr<qg::TaskToken>& token,
+              const QString& query, const QString& rootDir,
               const RecursiveSearchConfig& cfg, std::uint64_t generation);
 
     std::shared_ptr<qg::TaskToken> m_token;

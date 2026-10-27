@@ -1,4 +1,7 @@
 #include "operations.hpp"
+
+#include "workers/tasks.hpp"
+
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
@@ -6,26 +9,74 @@
 #include <QUrl>
 #include <QDebug>
 
+#include <memory>
+
 bool copyDirRecursive(const QString& src, const QString& dst);
 
 FileOperationsService::FileOperationsService(QObject* parent) : QObject(parent) {}
 
+// Every mutating entry point is submitted to the bounded I/O pool and publishes
+// its result back to this service on the GUI thread (DESIGN.md §17.6, §15.3,
+// §22.1). The *Sync helpers stay the payload: they are pure I/O, safe on any
+// thread, and are what the tests call directly.
+//
+// Contract: submitted from the GUI thread (the Q_INVOKABLE facade always is),
+// `work` runs on a pool thread and never touches GUI state, and `deliver` —
+// `emitFinished` — runs on the GUI thread only while `this` is still alive
+// (submitTask's lifetime guard). Results are delivered in completion order, not
+// request order, so a caller that keeps per-request state must correlate it with
+// the result it receives.
+//
+// Progress and cancellation (DESIGN.md §8.1, §15.4 "chunked with cancellation
+// checkpoints") are NOT implemented here: that needs a chunked copy and is the
+// follow-up increment FIX-FO-02, not a silent omission.
 void FileOperationsService::rename(const QString& path, const QString& newBaseName) {
-    emitFinished(QStringLiteral("rename"), renameSync(path, newBaseName));
+    auto result = std::make_shared<OperationResult>();
+    qg::submitTask(qg::WorkerPools::io(), qg::TaskPriority::Normal, nullptr, this,
+                   [path, newBaseName, result]() {
+                       *result = renameSync(path, newBaseName);
+                   },
+                   [this, result]() {
+                       emitFinished(QStringLiteral("rename"), *result);
+                   });
 }
 
 void FileOperationsService::move(const QStringList& paths, const QString& targetDir) {
-    emitFinished(QStringLiteral("move"), moveSync(paths, targetDir));
+    auto result = std::make_shared<OperationResult>();
+    qg::submitTask(qg::WorkerPools::io(), qg::TaskPriority::Normal, nullptr, this,
+                   [paths, targetDir, result]() {
+                       *result = moveSync(paths, targetDir);
+                   },
+                   [this, result]() {
+                       emitFinished(QStringLiteral("move"), *result);
+                   });
 }
 
 void FileOperationsService::copy(const QStringList& paths, const QString& targetDir, bool) {
-    emitFinished(QStringLiteral("copy"), copySync(paths, targetDir));
+    auto result = std::make_shared<OperationResult>();
+    qg::submitTask(qg::WorkerPools::io(), qg::TaskPriority::Normal, nullptr, this,
+                   [paths, targetDir, result]() {
+                       *result = copySync(paths, targetDir);
+                   },
+                   [this, result]() {
+                       emitFinished(QStringLiteral("copy"), *result);
+                   });
 }
 
 void FileOperationsService::deletePermanently(const QStringList& paths) {
-    emitFinished(QStringLiteral("delete"), deletePermanentlySync(paths));
+    auto result = std::make_shared<OperationResult>();
+    qg::submitTask(qg::WorkerPools::io(), qg::TaskPriority::Normal, nullptr, this,
+                   [paths, result]() {
+                       *result = deletePermanentlySync(paths);
+                   },
+                   [this, result]() {
+                       emitFinished(QStringLiteral("delete"), *result);
+                   });
 }
 
+// reveal()/openWith() stay synchronous on the GUI thread: they only spawn a
+// short-lived launcher (`dbus-send`/`xdg-open`) and their detached/blocking
+// launch semantics are the subject of the launch-helper work item, not this one.
 void FileOperationsService::reveal(const QString& path) {
     OperationResult r;
     r.completedPath = path;

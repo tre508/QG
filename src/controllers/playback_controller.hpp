@@ -27,6 +27,9 @@ class PlaybackController : public QObject {
     Q_PROPERTY(QString positionLabel READ positionLabel NOTIFY contextChanged)
     Q_PROPERTY(bool canGoPrevious READ canGoPrevious NOTIFY contextChanged)
     Q_PROPERTY(bool canGoNext READ canGoNext NOTIFY contextChanged)
+    // Continuous playback (DESIGN.md playback §4.6/§25.7): at EOF, advance to
+    // the next item in the ordered context without leaving Stage or Cinema.
+    Q_PROPERTY(bool autoAdvance READ autoAdvance WRITE setAutoAdvance NOTIFY autoAdvanceChanged)
 
 public:
     explicit PlaybackController(QObject* parent = nullptr);
@@ -72,6 +75,11 @@ public:
     Q_INVOKABLE void applyResumeDecision(const QString& identity, bool resume,
                                          double positionSeconds);
 
+    // Auto-advance at EOF (§4.6): when the session reaches Ended, step to the
+    // next context entry and play it, preserving Stage/Cinema.
+    bool autoAdvance() const;
+    void setAutoAdvance(bool enabled);
+
 signals:
     void playingChanged();
     void cinemaActiveChanged();
@@ -82,6 +90,7 @@ signals:
     void contextChanged();
     // Prev/Next hit a boundary — surfaced as an "End of folder" toast (§23.8).
     void endOfFolder();
+    void autoAdvanceChanged();
 
 private:
     void refreshContext();
@@ -91,6 +100,12 @@ private:
     void onModelStructureChanged();
     void onModelDataChanged(const QModelIndex& topLeft, const QModelIndex& bottomRight,
                             const QList<int>& roles);
+    // One connection per session acquisition; the session is a process singleton,
+    // so a duplicate connection would advance twice per EOF.
+    void attachSession();
+    // Session state mirror: emit playingChanged so the transport reflects
+    // pause/EOF/error/stop, and auto-advance on Ended when enabled.
+    void onSessionStateChanged(PlaybackSession::State state);
     ReelEntry reelEntryFor(int contextIndex) const;
     // Probed duration (seconds; <=0 when unknown) and watched state from the
     // canonical model, used for resume eligibility (DESIGN.md §19.6).
@@ -104,4 +119,5 @@ private:
     PlaybackSession* currentSession_ = nullptr;
     bool cinemaActive_ = false;
     int reelFilter_ = 0;
+    bool autoAdvance_ = true;
 };

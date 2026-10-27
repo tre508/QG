@@ -1,4 +1,5 @@
 #pragma once
+#include <QElapsedTimer>
 #include <QObject>
 #include <QPointer>
 #include <QString>
@@ -54,6 +55,34 @@ public:
     // Used to restore the real position after a rejected seek (§3.1).
     double actualPosition() const;
 
+    // Absolute seek target normalisation (DESIGN.md playback §3.1, §9):
+    //   * NaN → 0 (a comparison against NaN is false, which is also where the
+    //     previous `position > 0 ? position : 0` clamp landed);
+    //   * negative and -inf → 0;
+    //   * +inf → the known duration (else 0), because "end of media" is the only
+    //     meaningful target infinity can name; seekAbsolute() refuses +inf when no
+    //     duration is known rather than silently seeking to the start;
+    //   * clamped to [0, duration] when the duration is known.
+    // Pure and static, so the rule can be verified without a backend.
+    static double normalizeSeekTarget(double position, double duration);
+
+    // Injected seek dispatch. The production path issues mpv's asynchronous
+    // command; tests inject a recorder so the consolidation/accumulation policy
+    // can be verified without a render context (the same seam style as
+    // MountService::setEnricher / setEjector and setPositionLoader).
+    // `mode` is an mpv seek mode; returns an mpv error code (0 on success).
+    using SeekDispatcher = std::function<int(double targetSeconds, const QString &mode)>;
+    void setSeekDispatcher(SeekDispatcher dispatcher);
+
+    // Rapid-seek consolidation (DESIGN.md playback §3.1.4). A burst is at most one
+    // seek command per window, with the newest target flushed when the window
+    // closes; the intended position owns the indicator for at most kSeekSettleMs
+    // so a burst of relative requests cannot be dragged back by a stale
+    // observation (§3.1.2/§3.1.5). Exposed for tests and callers.
+    static constexpr int kSeekCoalesceMs = 120;
+    static constexpr int kSeekSettleMs = 2000;
+    static constexpr double kSeekSettleToleranceSeconds = 0.35;
+
     // Resume policy (DESIGN.md §19.6): Always(=0, default) / Ask(=1) / Never(=2).
     Q_PROPERTY(int resumePolicy READ resumePolicy WRITE setResumePolicy)
     Q_INVOKABLE int resumePolicy() const;
@@ -108,6 +137,25 @@ private:
 
     void connectBackend();
 
+    // --- Seeking (DESIGN.md playback §3.1) ------------------------------------
+    // The position a relative request must accumulate onto: the newest *intended*
+    // target while a seek is being pursued, else the observed session position.
+    double intendedPosition() const;
+    // Record a new absolute target: publish it immediately (§3.1.2) and either
+    // issue it or hold it for the current consolidation window (§3.1.4).
+    void requestSeek(double target);
+    // Issue the newest target now and open the consolidation window.
+    void flushSeek();
+    // Consolidation window elapsed: flush the latest deferred target, if any.
+    void onSeekWindowClosed();
+    // Hand one absolute target to the injected dispatcher or to mpv.
+    int dispatchSeek(double target);
+    // Refuse a seek: restore the real position, drop the pending burst, notify
+    // the UI (§3.1).
+    void rejectSeek();
+    // Forget any intended position (media change, stop, backend change).
+    void clearSeekIntent();
+
     static PlaybackManager *instance_;
 
     // QPointer: PlaybackManager is a process singleton and outlives any one
@@ -128,4 +176,16 @@ private:
     QString lastWrittenIdentity_;
     qint64 lastWrittenMs_ = -1;
     QTimer *tickTimer_ = nullptr; // 5s periodic position persistence
+
+    // --- Seek state (DESIGN.md playback §3.1.2/§3.1.4/§3.1.5) -----------------
+    SeekDispatcher seekDispatcher_;      // empty → mpv's asynchronous command
+    double seekTarget_ = 0.0;            // newest intended absolute position
+    bool seekIntent_ = false;            // an intended position is being pursued
+    bool seekWindowOpen_ = false;        // a seek was issued inside this window
+    double pendingSeekTarget_ = 0.0;     // newest target waiting for the window
+    bool seekPending_ = false;           // pendingSeekTarget_ is meaningful
+    QTimer *seekCoalesceTimer_ = nullptr; // closes the consolidation window
+    // Started when a target is issued: bounds how long the intended position may
+    // keep owning the indicator before observed reality takes over (§3.1.5).
+    QElapsedTimer seekSettleTimer_;
 };

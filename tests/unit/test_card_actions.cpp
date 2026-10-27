@@ -169,8 +169,10 @@ void CardActionsTest::renameReachesTheFileSystem()
     QCOMPARE(requested.at(0).at(0).toString(), original);
     QCOMPARE(requested.at(0).at(1).toString(), QStringLiteral("renamed"));
 
-    // The rename actually happened, with the extension preserved.
-    QVERIFY(QFile::exists(dir.filePath(QStringLiteral("renamed.mp4"))));
+    // The rename actually happened, with the extension preserved. The service is
+    // an asynchronous facade (AUD-003), so the effect lands after the event loop
+    // turns — wait for the filesystem instead of assuming inline completion.
+    QTRY_VERIFY(QFile::exists(dir.filePath(QStringLiteral("renamed.mp4"))));
     QVERIFY(!QFile::exists(original));
 }
 

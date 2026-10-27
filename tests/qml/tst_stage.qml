@@ -50,4 +50,30 @@ TestCase {
         verify(stage !== null)
         verify(findChild(stage, "videoSurface") !== null)
     }
+
+    // AUD-001: a seek the manager refuses (non-seekable media, DESIGN.md playback
+    // §3.1) must surface on the transport bar's amber affordance. The manager owns
+    // the policy; the Stage only forwards the notification.
+    function test_stageForwardsRefusedSeekToTransport() {
+        const stage = createTemporaryObject(stageComponent, null, {})
+        verify(stage !== null)
+        const transport = findChild(stage, "stageTransport")
+        verify(transport !== null, "Stage hosts the real TransportBar")
+
+        // A stand-in for PlaybackManager: the one signal the Stage listens to.
+        const manager = Qt.createQmlObject(
+            'import QtQuick; QtObject { signal seekRejected(); function attachSurface(s) {} }',
+            stage, "refusedSeekStandIn")
+        stage.playbackManager = manager
+
+        compare(transport.seekRejected, false, "no affordance before a refusal")
+        manager.seekRejected()
+        compare(transport.seekRejected, true, "a refused seek raises the amber flash")
+
+        // The manager may be replaced/cleared without the Stage erroring.
+        stage.playbackManager = null
+        manager.seekRejected()
+        verify(true, "emitting after the manager was detached is harmless")
+        manager.destroy()
+    }
 }

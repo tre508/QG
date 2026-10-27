@@ -98,7 +98,14 @@ void SearchController::clear()
     if (proxy_) {
         proxy_->setQuery(QString());
     }
-    emit activeChanged(false);
+    // Notify `active` first (the shell's handler restores Browse), then the
+    // summary/count: after a clear the summary is empty, and a binding on
+    // `summary`/`resultCount` must be told so. Previously `clear()` emitted
+    // `activeChanged(false)` only, so a bound summary kept the stale text after
+    // Esc. `setActive` is a no-op when the value did not change, so a repeated
+    // clear does not re-notify the property.
+    setActive(false);
+    emit resultsChanged(summary());
 }
 
 void SearchController::flushQuery()
@@ -109,8 +116,24 @@ void SearchController::flushQuery()
     } else if (proxy_) {
         proxy_->setQuery(currentQuery_);
     }
-    emit activeChanged(!currentQuery_.isEmpty());
+    // `active` is published before `resultsChanged` so the shell's handler can
+    // install the folder/sort context that `summary()` embeds.
+    setActive(!currentQuery_.isEmpty());
     emit resultsChanged(summary());
+}
+
+void SearchController::setActive(bool active)
+{
+    if (active_ == active) {
+        return;
+    }
+    active_ = active;          // member first: the notification never precedes it
+    emit activeChanged(active_);
+}
+
+bool SearchController::active() const
+{
+    return active_;
 }
 
 void SearchController::startRecursiveWalk()
@@ -123,14 +146,22 @@ void SearchController::startRecursiveWalk()
     recursiveGeneration_ = recursiveService_->start(currentQuery_, searchRoot_);
 }
 
+int SearchController::resultCount() const
+{
+    if (currentQuery_.isEmpty()) {
+        return 0;
+    }
+    return scopeRecursive_
+        ? (recursiveModel_ ? recursiveModel_->rowCount() : 0)
+        : (proxy_ ? proxy_->resultCount() : 0);
+}
+
 QString SearchController::summary() const
 {
     if (currentQuery_.isEmpty()) {
         return {};
     }
-    const int n = scopeRecursive_
-        ? (recursiveModel_ ? recursiveModel_->rowCount() : 0)
-        : (proxy_ ? proxy_->resultCount() : 0);
+    const int n = resultCount();
     const QString scopeStr = folderName_.isEmpty()
         ? (scopeRecursive_ ? QStringLiteral("in subfolders") : QStringLiteral("in this folder"))
         : (scopeRecursive_

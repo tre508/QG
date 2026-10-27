@@ -70,6 +70,16 @@ struct ThumbnailExtraction {
     qint64 sourceSize = 0;
     Error error;
 
+    // Where the pixels came from. `QgCache` means they were read back from QG's own
+    // cache file for this key — that file *is* the final artefact and must not be
+    // re-encoded (AUD-008 / FIX-TH-01; re-publishing a cache hit costs a synchronous
+    // PNG encode on the GUI thread per row, FIX-TH-02). `FreedesktopCache` means the
+    // native cache served them, which is a different source: QG's own cache still has
+    // to be written through with what was served.
+    enum class CacheOrigin { Decoded, QgCache, FreedesktopCache };
+    CacheOrigin cacheOrigin = CacheOrigin::Decoded;
+
+    bool fromCache() const noexcept { return cacheOrigin != CacheOrigin::Decoded; }
     bool ok() const noexcept { return !image.isNull(); }
 };
 
@@ -92,6 +102,14 @@ struct ThumbnailRequest {
     qint64 size = 0;
     int width = 320;
     int height = 180;
+    // Set by the card's manual Retry control: it bypasses the terminal-failure
+    // backoff (§18.5) instead of being refused by it.
+    bool manualRetry = false;
+    // Set by the controller's GUI-thread cache consultation (never by the
+    // scheduler) when a valid QG cache entry exists: `runExtraction` reads this
+    // PNG on the media pool instead of decoding, so the GUI thread performs no
+    // file I/O (§22.1).
+    QString cachedPngPath;
 };
 
 // Pure scheduling policy: visible rows are requested first; queued work for rows
@@ -158,13 +176,18 @@ enum class ThumbnailAction {
     Terminal, // failed terminally; skip until source changes or manual retry
 };
 
+// Bounded retry budget for a failed thumbnail (§18.5: "up to 2 retries, then the
+// marker is terminal until the source changes"). Named once so the controller's
+// call site and the policy's default cannot drift apart.
+inline constexpr int kMaxThumbnailFailRetries = 2;
+
 // Pure policy: bounded retries (up to `maxRetries` after the first failure),
 // invalidation when the source (mtime_ns, size) changes, and explicit manual
 // retry. A failed marker is terminal otherwise.
 ThumbnailAction decideThumbnail(const ThumbnailCacheState &cache,
                                 qint64 sourceMtimeNs,
                                 qint64 sourceSize,
-                                int maxRetries = 2,
+                                int maxRetries = kMaxThumbnailFailRetries,
                                 bool manualRetry = false);
 
 } // namespace qg

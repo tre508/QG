@@ -153,6 +153,9 @@ void ThumbnailController::retry(const QString &identity)
     request.size = entry->size;
     request.width = m_width;
     request.height = m_height;
+    // A hand retry is the user's escape hatch from a terminal failure (§18.5),
+    // so the cache decision must not refuse it.
+    request.manualRetry = true;
     m_scheduler.request(row, request);
 
     if (m_immediate) {
@@ -199,7 +202,19 @@ void ThumbnailController::applyResult(const ThumbnailRequest &request,
         key.identity = request.identity;
         key.mtimeNs = request.mtimeNs;
         key.size = request.size;
-        const QString published = publishThumbnail(m_cacheDir, key, extraction.image);
+        // A QG-cache hit *is* the file for this key, so re-encoding it would pay a
+        // synchronous PNG encode per served row for no new pixels (AUD-008 /
+        // FIX-TH-01). A freedesktop hit is a different source and is still written
+        // through to QG's cache, so the delivered file always matches what was
+        // served. A vanished file falls back to publishing, which also repairs the
+        // row's `cache_path` below.
+        const QString existing = qgThumbnailPath(m_cacheDir, key);
+        const bool alreadyPublished =
+            extraction.cacheOrigin == ThumbnailExtraction::CacheOrigin::QgCache
+            && QFileInfo::exists(existing);
+        const QString published = alreadyPublished
+                                      ? existing
+                                      : publishThumbnail(m_cacheDir, key, extraction.image);
 
         if (published.isEmpty()) {
             // Extraction produced pixels we could not store; report it honestly
@@ -237,8 +252,26 @@ void ThumbnailController::applyResult(const ThumbnailRequest &request,
 
 ThumbnailExtraction ThumbnailController::runExtraction(const ThumbnailRequest &request) const
 {
-    // Cache first: a freedesktop hit must never pay for a decode, even when an
-    // extractor has been injected (DESIGN §18.2 "Serve" precedes "Extract").
+    // Runs on the media pool; never touches the database (thread-affine).
+
+    // 1. QG's own cache: the GUI thread already resolved the row through the
+    //    §18.5 policy and handed over the persisted PNG path, so this reads the
+    //    image without touching the decoder (§18.2 "Serve" precedes "Extract").
+    if (!request.cachedPngPath.isEmpty()) {
+        const QImage cached(request.cachedPngPath);
+        if (!cached.isNull()) {
+            ThumbnailExtraction hit;
+            hit.image = cached;
+            hit.sourceMtimeNs = request.mtimeNs;
+            hit.sourceSize = request.size;
+            hit.cacheOrigin = ThumbnailExtraction::CacheOrigin::QgCache;
+            return hit;
+        }
+        // The row points at a PNG that vanished (cache cleaned, path moved):
+        // fall through and regenerate rather than failing.
+    }
+
+    // 2. Native freedesktop thumbnail: instant and free (§18.2).
     if (!m_fdHome.isEmpty()) {
         const FreedesktopThumbnail native =
             findFreedesktopThumbnail(m_fdHome, request.path, request.mtimeNs);
@@ -247,15 +280,77 @@ ThumbnailExtraction ThumbnailController::runExtraction(const ThumbnailRequest &r
             result.image = native.image;
             result.sourceMtimeNs = request.mtimeNs;
             result.sourceSize = request.size;
+            result.cacheOrigin = ThumbnailExtraction::CacheOrigin::FreedesktopCache;
             return result;
         }
     }
 
+    // 3. Extract (§18.3): injected extractor first, then the in-process decoder.
     if (m_extractor) {
         return m_extractor(request);
     }
 
     return extractThumbnail(request.path, request.width, request.height);
+}
+
+ThumbnailController::CacheDecision ThumbnailController::consultQgCache(
+    const ThumbnailRequest &request, QString *cachePath) const
+{
+    // GUI thread only (see the header). This is the database half of the
+    // "Serve → Extract" decision of §18.2 — without it the PNG + DB cache was
+    // write-only: every navigation paid FFmpeg for every visible row, and a file
+    // carrying a failure marker was retried on every visit (AUD-008 / FIX-TH-01).
+    if (cachePath != nullptr) {
+        cachePath->clear();
+    }
+    if (m_database == nullptr || request.identity.isEmpty()) {
+        return CacheDecision::Extract;
+    }
+
+    ThumbnailRepository repository(*m_database);
+    ThumbnailRepository::Record record;
+    if (!repository.lookup(request.identity, &record)) {
+        return CacheDecision::Extract; // no row: extract (§18.3)
+    }
+
+    ThumbnailCacheState cache;
+    cache.present = true;
+    cache.state = record.state;
+    cache.failCount = record.failCount;
+    cache.sourceMtimeNs = record.sourceMtimeNs;
+    cache.sourceSize = record.sourceSize;
+
+    // The policy compares the persisted source stamp with the *current*
+    // (mtime_ns, size): a touched/replaced file regenerates, a failed file
+    // retries within its bounded budget, and an exhausted marker is terminal
+    // until the source changes or the user retries by hand (§18.5).
+    const ThumbnailAction action = decideThumbnail(
+        cache, request.mtimeNs, request.size, kMaxThumbnailFailRetries, request.manualRetry);
+
+    if (action == ThumbnailAction::Serve && !record.cachePath.isEmpty()) {
+        if (cachePath != nullptr) {
+            *cachePath = record.cachePath;
+        }
+        return CacheDecision::Serve;
+    }
+
+    if (action == ThumbnailAction::Terminal) {
+        return CacheDecision::Terminal;
+    }
+
+    // Generate / Retry: a decode is genuinely needed.
+    return CacheDecision::Extract;
+}
+
+ThumbnailExtraction ThumbnailController::terminalResult(const ThumbnailRequest &request) const
+{
+    ThumbnailExtraction failed;
+    failed.sourceMtimeNs = request.mtimeNs;
+    failed.sourceSize = request.size;
+    failed.error = Error::make(ErrorCode::OperationFailed,
+                               QStringLiteral("Thumbnail generation failed previously"),
+                               request.path);
+    return failed;
 }
 
 void ThumbnailController::processAllForTesting()
@@ -265,8 +360,20 @@ void ThumbnailController::processAllForTesting()
         if (!request) {
             break;
         }
-        const ThumbnailExtraction extraction = runExtraction(*request);
-        applyResult(*request, m_generation, extraction);
+        // Same order as pumpAsync (GUI thread → cache decision → decode), so
+        // immediate mode exercises the production path.
+        QString cachedPngPath;
+        const CacheDecision decision = consultQgCache(*request, &cachedPngPath);
+        if (decision == CacheDecision::Terminal) {
+            applyResult(*request, m_generation, terminalResult(*request));
+            continue;
+        }
+        ThumbnailRequest dispatched = *request;
+        if (decision == CacheDecision::Serve) {
+            dispatched.cachedPngPath = cachedPngPath;
+        }
+        const ThumbnailExtraction extraction = runExtraction(dispatched);
+        applyResult(dispatched, m_generation, extraction);
     }
 }
 
@@ -279,33 +386,62 @@ void ThumbnailController::injectResultForTesting(const ThumbnailRequest &request
 
 void ThumbnailController::pumpAsync()
 {
-    if (m_processing) {
+    // `m_resolving` guards the cache-served path below: it applies results
+    // synchronously, and a re-entrant call from a signal it emits (a binding that
+    // re-reports its viewport) must not start a second pump — that would break the
+    // one-in-flight-request invariant (DESIGN §18.4, §22.2).
+    if (m_processing || m_resolving) {
         return;
     }
     if (!m_scheduler.hasPending()) {
         return;
     }
 
-    const auto request = m_scheduler.takeNext();
-    if (!request) {
+    // QG's own cache is consulted here, on the GUI thread, before any pool work
+    // is dispatched: a cache hit or a terminal failure completes the request
+    // without a decode (§18.2 "Serve" precedes "Extract"). Loop rather than
+    // recurse so a long run of served rows cannot grow the stack.
+    m_resolving = true;
+    while (m_scheduler.hasPending()) {
+        const auto request = m_scheduler.takeNext();
+        if (!request) {
+            m_resolving = false;
+            return;
+        }
+
+        const quint64 generation = m_generation;
+        QString cachedPngPath;
+        const CacheDecision decision = consultQgCache(*request, &cachedPngPath);
+        if (decision == CacheDecision::Terminal) {
+            // Retry budget exhausted: the amber placeholder is re-raised without
+            // a decode, and no pool work is queued (§18.5).
+            applyResult(*request, generation, terminalResult(*request));
+            continue;
+        }
+
+        // Real work: hand the request to the media pool. A cached PNG is read
+        // there, not here (§22.1).
+        m_processing = true;
+        ThumbnailRequest captured = *request;
+        if (decision == CacheDecision::Serve) {
+            captured.cachedPngPath = cachedPngPath;
+        }
+        auto extraction = std::make_shared<ThumbnailExtraction>();
+
+        submitTask(WorkerPools::cpuMedia(),
+                   TaskPriority::Normal,
+                   nullptr,
+                   this,
+                   [this, captured, extraction]() { *extraction = runExtraction(captured); },
+                   [this, captured, generation, extraction]() {
+                       applyResult(captured, generation, *extraction);
+                       m_processing = false;
+                       pumpAsync(); // continue with the next pending request
+                   });
+        m_resolving = false;
         return;
     }
-
-    m_processing = true;
-    const ThumbnailRequest captured = *request;
-    const quint64 generation = m_generation;
-    auto extraction = std::make_shared<ThumbnailExtraction>();
-
-    submitTask(WorkerPools::cpuMedia(),
-               TaskPriority::Normal,
-               nullptr,
-               this,
-               [this, captured, extraction]() { *extraction = runExtraction(captured); },
-               [this, captured, generation, extraction]() {
-                   applyResult(captured, generation, *extraction);
-                   m_processing = false;
-                   pumpAsync(); // continue with the next pending request
-               });
+    m_resolving = false;
 }
 
 } // namespace qg

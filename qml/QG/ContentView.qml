@@ -21,6 +21,36 @@ Item {
     enum Density { Gallery, Standard, Compact }
     property int density: ContentView.Standard
 
+    // Legacy single-selection cursor, used only when no SelectionState is
+    // injected (tests). Declared so the fallback branches are not undefined.
+    property int focusIndex: -1
+    property int selectedIndex: -1
+
+    // --- Observable selection/focus state (AUD-004 / FIX-SEL-01) -------------
+    // A QML binding only re-evaluates when a *property* it read changes. The
+    // previous invokable-only reads (`selectionState.focusIndex()`,
+    // `selectionState.isSelected(...)`) created no dependency, so card borders,
+    // the cyan focus ring, the status strip and the context-menu title were
+    // computed once at delegate creation and never again. These two adapters
+    // read the real SelectionState's properties (creating the dependency) and
+    // still accept a test double that exposes the same state as invokables.
+    readonly property int selFocusIndex: {
+        if (!selectionState)
+            return focusIndex
+        const v = selectionState.focusIndex
+        return typeof v === "function" ? selectionState.focusIndex() : v
+    }
+    // Monotonic selection revision: read by per-identity predicates so they have
+    // something to depend on (`isSelected()` alone notifies nothing).
+    readonly property int selRevision: {
+        if (!selectionState)
+            return 0
+        const v = selectionState.selectionRevision
+        if (typeof v === "function")
+            return selectionState.selectionRevision()
+        return (v === undefined || v === null) ? 0 : v
+    }
+
     readonly property bool compact: density === ContentView.Compact
     readonly property int itemCount: compact ? compactList.count
                                     : (manifest ? manifestList.count : grid.count)
@@ -37,6 +67,12 @@ Item {
 
     // Scroll/selection preservation across manifest toggle
     property real savedGridViewY: 0
+
+    // §7.4: the no-results overlay's "Clear search" is an intent, not a view
+    // action — the query belongs to SearchController, so the view forwards it to
+    // the shell. Leaving the Manifest here on its own left the morph open and the
+    // controller active over a Browse grid.
+    signal searchClearRequested()
 
     function enterManifest(proxy, query) {
         savedGridViewY = grid.visible ? grid.contentY : compactList.contentY
@@ -81,6 +117,15 @@ Item {
     // Responsive target supplied by the shell's §3.5 table (Main.qml). The
     // default is the wide-layout value so the view is deterministic standalone.
     property int targetCardWidth: 240
+
+    // Vertical space owned by an inline surface above the grid (the Stage).
+    // The shell binds this to the Stage's height so the cards reflow beneath it
+    // instead of being covered (DESIGN.md §3.4, playback §2.1.7, §2.2).
+    property real reservedTop: 0
+
+    // Effective top inset of every presentation: the standard pad plus whatever
+    // an inline surface above the grid has reserved.
+    readonly property real topInset: pad + reservedTop
     readonly property int targetCard: density === ContentView.Gallery ? 340 : targetCardWidth
     readonly property int minCard: density === ContentView.Gallery ? 240 : 168
     readonly property int maxCard: density === ContentView.Gallery ? 360 : 320
@@ -166,6 +211,53 @@ Item {
         return (model && model.identityAt) ? model.identityAt(index) : ""
     }
 
+    // Identity of the row at `index` in the *current view order*. Browse rows are
+    // canonical model rows; Manifest rows are proxy rows, so their identity has
+    // to come from the model that produced them (SearchProxy maps a proxy row
+    // back to its source FolderModel row) — resolving a Manifest row through the
+    // browse model would select an unrelated entry.
+    function identityAt(index) {
+        if (index < 0)
+            return ""
+        if (manifest) {
+            const src = manifestList.model
+            if (src && typeof src.identityAt === "function")
+                return src.identityAt(index)
+            return ""
+        }
+        return identityForIndex(index)
+    }
+
+    // Every identity in the current view order (Ctrl+A, §13.2). Entries without
+    // an identity (an unresolved recursive hit) are skipped: selection is
+    // identity-keyed, and an empty key would match everything.
+    function allIdentities() {
+        const ids = []
+        for (let i = 0; i < itemCount; ++i) {
+            const id = identityAt(i)
+            if (id && id.length > 0)
+                ids.push(id)
+        }
+        return ids
+    }
+
+    // Identities of the inclusive index range [from, to], in view order. Only the
+    // view knows this order, which is why range selection is built here and not
+    // in SelectionState.
+    function identitiesInRange(from, to) {
+        const ids = []
+        if (itemCount <= 0)
+            return ids
+        const lo = Math.max(0, Math.min(from, to))
+        const hi = Math.min(itemCount - 1, Math.max(from, to))
+        for (let i = lo; i <= hi; ++i) {
+            const id = identityAt(i)
+            if (id && id.length > 0)
+                ids.push(id)
+        }
+        return ids
+    }
+
     function beginRename(index) {
         if (index >= 0 && index < itemCount)
             renameIndex = index
@@ -193,18 +285,17 @@ Item {
     }
 
     function clampFocus() {
+        if (!selectionState) return
         if (itemCount <= 0) {
-            if (selectionState) {
-                selectionState.setFocusIndex(-1)
-            }
+            selectionState.setFocusIndex(-1)
             return
         }
-        if (selectionState && selectionState.focusIndex() < 0) {
+        if (selFocusIndex < 0) {
             selectionState.setFocusIndex(0)
+            return
         }
-        if (selectionState) {
-            selectionState.setFocusIndex(Math.min(selectionState.focusIndex(), itemCount - 1))
-        }
+        if (selFocusIndex > itemCount - 1)
+            selectionState.setFocusIndex(itemCount - 1)
     }
     onItemCountChanged: {
         clampFocus()
@@ -226,8 +317,13 @@ Item {
             last = first + Math.ceil(compactList.height / rowH)
         } else {
             const rowH = cellHeight + gap
-            const firstRow = Math.floor((grid.contentY - pad) / rowH)
-            const lastRow = Math.ceil((grid.contentY + grid.height - pad) / rowH)
+            // `contentY` is measured from the content origin, which the top inset
+            // already places below the Stage — so the visible content window is
+            // [contentY, contentY + height) and no inset may be subtracted here.
+            // (Subtracting the margin double-counted it; with a large Stage inset
+            // that dropped the first screen entirely, AUD-009.)
+            const firstRow = Math.floor(grid.contentY / rowH)
+            const lastRow = Math.ceil((grid.contentY + grid.height) / rowH)
             first = firstRow * columns
             last = (lastRow + 1) * columns - 1
         }
@@ -242,6 +338,9 @@ Item {
     onColumnsChanged: reportVisibleRange()
     onManifestChanged: reportVisibleRange()
     onCompactChanged: reportVisibleRange()
+    // The Stage appearing/disappearing reserves or releases vertical space, which
+    // changes what the first screen shows (AUD-009).
+    onReservedTopChanged: reportVisibleRange()
 
     function activateIndex(index) {
         if (index < 0 || index >= itemCount)
@@ -259,35 +358,71 @@ Item {
         activated(index)
         activatedItem(index, pathForIndex(index), isFolderForIndex(index))
     }
+    // --- Focus movement (view-owned bounds) ---------------------------------
+    // SelectionState cannot clamp: only the view knows the column count, the row
+    // height and therefore `itemCount` (AUD-004 — a model that guesses view order
+    // is the same class of defect as a range that guesses indices).
+    function moveFocusTo(index) {
+        if (!selectionState) return
+        if (itemCount <= 0) {
+            selectionState.setFocusIndex(-1)
+            return
+        }
+        selectionState.setFocusIndex(Math.max(0, Math.min(itemCount - 1, index)))
+    }
     function moveFocus(delta) {
         if (!selectionState) return
-        const idx = selectionState.focusIndex()
+        const idx = selFocusIndex
         if (idx < 0 || itemCount <= 0)
             return
-        selectionState.setFocusIndex(Math.max(0, Math.min(itemCount - 1, idx + delta)))
+        moveFocusTo(idx + delta)
+    }
+    // Shift+arrow (§13.2): move the cursor, then extend the range from the anchor
+    // to its new position. Previously the Shift branches extended to the *current*
+    // focus without moving it, so they selected nothing new.
+    function moveFocusAndExtend(delta) {
+        if (!selectionState) return
+        const idx = selFocusIndex
+        if (idx < 0 || itemCount <= 0)
+            return
+        const next = Math.max(0, Math.min(itemCount - 1, idx + delta))
+        selectionState.setFocusIndex(next)
+        extendRangeTo(next)
     }
     function selectIndex(index) {
         if (!selectionState) return
-        const identity = identityForIndex(index)
+        const identity = identityAt(index)
         if (identity.length === 0) return
         selectionState.selectOne(identity, index)
         selectionChanged(index)
     }
     function toggleSelection(index) {
         if (!selectionState) return
-        const identity = identityForIndex(index)
+        const identity = identityAt(index)
         if (identity.length === 0) return
         selectionState.toggle(identity, index)
     }
-    function extendRange(index) {
+    // Shift+click / Shift+arrow (§5.5): the anchor is the last click or, with no
+    // click yet, the row the cursor came from; the selection becomes every row
+    // between the anchor and `index` (inclusive, in view order).
+    function extendRangeTo(index) {
         if (!selectionState) return
-        const identity = identityForIndex(index)
-        if (identity.length === 0) return
-        selectionState.extendRange(identity, index)
+        if (index < 0 || index >= itemCount) return
+        let anchor = selectionState.anchorIndex
+        if (typeof anchor === "function")
+            anchor = selectionState.anchorIndex()
+        if (anchor === undefined || anchor === null || anchor < 0)
+            anchor = (selFocusIndex >= 0 ? selFocusIndex : index)
+        const ids = identitiesInRange(anchor, index)
+        if (ids.length === 0) return
+        selectionState.extendRangeTo(ids, index)
     }
+    // Ctrl+A (§13.2): every identity in the current view order.
     function selectAll() {
         if (!selectionState) return
-        selectionState.selectAll()
+        const ids = allIdentities()
+        if (ids.length === 0) return
+        selectionState.selectAll(ids)
     }
     function clearSelection() {
         if (!selectionState) return
@@ -316,7 +451,7 @@ Item {
         switch (event.key) {
         case Qt.Key_Left:
             if (event.modifiers & Qt.ShiftModifier) {
-                extendRange(selectionState ? selectionState.focusIndex() : focusIndex)
+                moveFocusAndExtend(-1)
             } else {
                 moveFocus(-1)
                 if (!(event.modifiers & Qt.ControlModifier)) clearSelection()
@@ -324,7 +459,7 @@ Item {
             event.accepted = true; break
         case Qt.Key_Right:
             if (event.modifiers & Qt.ShiftModifier) {
-                extendRange(selectionState ? selectionState.focusIndex() : focusIndex)
+                moveFocusAndExtend(1)
             } else {
                 moveFocus(1)
                 if (!(event.modifiers & Qt.ControlModifier)) clearSelection()
@@ -332,7 +467,7 @@ Item {
             event.accepted = true; break
         case Qt.Key_Up:
             if (event.modifiers & Qt.ShiftModifier) {
-                extendRange(selectionState ? selectionState.focusIndex() : focusIndex)
+                moveFocusAndExtend(-(compact ? 1 : columns))
             } else {
                 moveFocus(-(compact ? 1 : columns))
                 if (!(event.modifiers & Qt.ControlModifier)) clearSelection()
@@ -340,7 +475,7 @@ Item {
             event.accepted = true; break
         case Qt.Key_Down:
             if (event.modifiers & Qt.ShiftModifier) {
-                extendRange(selectionState ? selectionState.focusIndex() : focusIndex)
+                moveFocusAndExtend(compact ? 1 : columns)
             } else {
                 moveFocus(compact ? 1 : columns)
                 if (!(event.modifiers & Qt.ControlModifier)) clearSelection()
@@ -348,29 +483,35 @@ Item {
             event.accepted = true; break
         case Qt.Key_Home:
             if (event.modifiers & Qt.ShiftModifier) {
-                extendRange(0)
+                moveFocusAndExtend(-itemCount)   // clamped to row 0 by moveFocusAndExtend
+            } else if (selectionState) {
+                moveFocusTo(0)
+            } else {
+                focusIndex = 0
             }
-            if (selectionState) selectionState.setFocusIndex(0)
-            else focusIndex = 0
             event.accepted = true; break
         case Qt.Key_End:
             if (event.modifiers & Qt.ShiftModifier) {
-                extendRange(itemCount - 1)
+                moveFocusAndExtend(itemCount)    // clamped to the last row
+            } else if (selectionState) {
+                moveFocusTo(itemCount - 1)
+            } else {
+                focusIndex = itemCount - 1
             }
-            if (selectionState) selectionState.setFocusIndex(itemCount - 1)
-            else focusIndex = itemCount - 1
             event.accepted = true; break
         case Qt.Key_PageUp:
             if (event.modifiers & Qt.ShiftModifier) {
-                extendRange(Math.max(0, (selectionState ? selectionState.focusIndex() : focusIndex) - 10))
+                moveFocusAndExtend(-10)
+            } else {
+                moveFocus(-10)
             }
-            if (selectionState) selectionState.setFocusIndex(Math.max(0, (selectionState.focusIndex()) - 10))
             event.accepted = true; break
         case Qt.Key_PageDown:
             if (event.modifiers & Qt.ShiftModifier) {
-                extendRange(Math.min(itemCount - 1, (selectionState ? selectionState.focusIndex() : focusIndex) + 10))
+                moveFocusAndExtend(10)
+            } else {
+                moveFocus(10)
             }
-            if (selectionState) selectionState.setFocusIndex(Math.min(itemCount - 1, (selectionState.focusIndex()) + 10))
             event.accepted = true; break
         // NOTE: Enter (open), F2 (rename), Delete / Shift+Delete (trash /
         // permanent) and Ctrl+Shift+F / Ctrl+Shift+W are routed centrally by
@@ -386,8 +527,17 @@ Item {
             break
         case Qt.Key_Space:
             if (event.modifiers & Qt.ControlModifier) {
-                if (selectionState) toggleSelection(selectionState.focusIndex())
-                else toggleSelection(focusIndex)
+                toggleSelection(selectionState ? selFocusIndex : focusIndex)
+                event.accepted = true
+            }
+            break
+        case Qt.Key_Escape:
+            // §5.5 / §13.2: Esc clears the selection. While the Manifest is up,
+            // Esc belongs to the search morph ("clear search" first) and while a
+            // session is active Main.qml's Esc shortcut stops playback — in both
+            // cases this view must leave the key alone.
+            if (!manifest && selectionState) {
+                clearSelection()
                 event.accepted = true
             }
             break
@@ -399,7 +549,7 @@ Item {
                     const buffer = typeToSelectBuffer.buffer()
                     if (buffer.length > 0 && model) {
                         // Find first matching item starting from current focus
-                        const startIdx = selectionState ? selectionState.focusIndex() : focusIndex
+                        const startIdx = selectionState ? selFocusIndex : focusIndex
                         for (let i = 0; i < itemCount; ++i) {
                             const idx = (startIdx + i) % itemCount
                             const name = model.nameAt ? model.nameAt(idx) : ""
@@ -425,8 +575,10 @@ Item {
     GridView {
         id: grid
         objectName: "contentGrid"
+        // The top inset is the pad plus whatever an inline surface (the Stage) has
+        // reserved, so cards reflow beneath it instead of being covered (AUD-009).
         anchors.fill: parent
-        anchors.topMargin: contentView.pad
+        anchors.topMargin: contentView.topInset
         anchors.bottomMargin: contentView.pad
         // Center the occupied grid (§3.5: leftover width becomes gutters at the
         // row edges). Only `leftMargin` is set: a non-zero `rightMargin` shrinks
@@ -469,8 +621,13 @@ Item {
                     widthPx: model.width === undefined ? 0 : model.width
                     heightPx: model.height === undefined ? 0 : model.height
                     detailedMeta: contentView.density !== ContentView.Gallery
-                    focused: selectionState ? (index === selectionState.focusIndex()) : (index === contentView.focusIndex)
-                    selected: selectionState ? selectionState.isSelected(identityForIndex(index)) : (index === contentView.selectedIndex)
+                    focused: index === contentView.selFocusIndex
+                    // Reading the revision is what makes this binding depend on the
+                    // selection model: isSelected() alone notifies nothing (AUD-004).
+                    selected: selectionState
+                              ? (contentView.selRevision >= 0
+                                 && selectionState.isSelected(contentView.identityAt(index)))
+                              : (index === contentView.selectedIndex)
                     renaming: index === contentView.renameIndex
                     onClicked: contentView.selectIndex(index)
                     onDoubleClicked: contentView.activateIndex(index)
@@ -501,8 +658,11 @@ Item {
                     videoCount: model.videoCount === undefined ? 0 : model.videoCount
                     folderCount: model.folderCount === undefined ? 0 : model.folderCount
                     mosaicSources: model.mosaic === undefined ? [] : model.mosaic
-                    focused: selectionState ? (index === selectionState.focusIndex()) : (index === contentView.focusIndex)
-                    selected: selectionState ? selectionState.isSelected(identityForIndex(index)) : (index === contentView.selectedIndex)
+                    focused: index === contentView.selFocusIndex
+                    selected: selectionState
+                              ? (contentView.selRevision >= 0
+                                 && selectionState.isSelected(contentView.identityAt(index)))
+                              : (index === contentView.selectedIndex)
                     onClicked: contentView.selectIndex(index)
                     onDoubleClicked: contentView.activateIndex(index)
                     onDropReceived: function (paths, targetDir, isMove) {
@@ -520,7 +680,7 @@ Item {
         id: compactList
         objectName: "compactList"
         anchors.fill: parent
-        anchors.topMargin: contentView.pad
+        anchors.topMargin: contentView.topInset
         anchors.bottomMargin: contentView.pad
         cacheBuffer: 400
         clip: true
@@ -547,8 +707,11 @@ Item {
             watched: model.watched === true
             playing: model.playing === true
             thumbnailState: model.thumbnailState === undefined ? 0 : model.thumbnailState
-            focused: selectionState ? (index === selectionState.focusIndex()) : (index === contentView.focusIndex)
-            selected: selectionState ? selectionState.isSelected(identityForIndex(index)) : (index === contentView.selectedIndex)
+            focused: index === contentView.selFocusIndex
+            selected: selectionState
+                      ? (contentView.selRevision >= 0
+                         && selectionState.isSelected(contentView.identityAt(index)))
+                      : (index === contentView.selectedIndex)
             onClicked: contentView.selectIndex(index)
             onDoubleClicked: contentView.activateIndex(index)
         }
@@ -559,6 +722,9 @@ Item {
     // --- Manifest density (Prompt 43/45) — search results ListView + header
     Item {
         anchors.fill: parent
+        // The sortable header and the results both start below the inset, so the
+        // Manifest behaves like the other two presentations (AUD-009).
+        anchors.topMargin: contentView.topInset
         visible: contentView.manifest
 
         // Sortable header row (synchronized with Order menu)
@@ -715,8 +881,13 @@ Item {
                 heightPx: model.height !== undefined ? model.height : 0
                 thumbnail: model.thumbnail !== undefined ? model.thumbnail : null
                 thumbnailState: model.thumbnailState !== undefined ? model.thumbnailState : 0
-                focused: selectionState ? (index === selectionState.focusIndex()) : (index === contentView.focusIndex)
-                selected: selectionState ? selectionState.isSelected(model.identity !== undefined ? model.identity : "") : (index === contentView.selectedIndex)
+                focused: index === contentView.selFocusIndex
+                // Manifest rows are proxy rows: identityAt() resolves the source
+                // row's identity through the manifest model (AUD-004).
+                selected: selectionState
+                          ? (contentView.selRevision >= 0
+                             && selectionState.isSelected(contentView.identityAt(index)))
+                          : (index === contentView.selectedIndex)
                 onClicked: contentView.selectIndex(index)
                 onDoubleClicked: contentView.activateIndex(index)
             }
@@ -728,7 +899,7 @@ Item {
             anchors.fill: parent
             visible: contentView.manifest && manifestList.count === 0 && contentView.searchQuery.length > 0
             query: contentView.searchQuery
-            onClearRequested: contentView.exitManifest()
+            onClearRequested: contentView.searchClearRequested()
         }
 
         // Result summary bar

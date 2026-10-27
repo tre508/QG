@@ -83,6 +83,14 @@ Rectangle {
         searchQueryChanged("")
     }
 
+    // Clear the query but stay in the field. The §7.4 no-results "Clear search"
+    // action and the field's ✕ are the same intent, so both take this path; the
+    // controller's `activeChanged(false)` is what restores Browse (§7.2).
+    function clearSearchQuery() {
+        searchField.text = ""
+        searchQueryChanged("")
+    }
+
     // Search scope toggle signal (Prompt 42 / FIX-TEST-001)
     signal scopeToggled(bool subfolders)
 
@@ -443,8 +451,7 @@ Rectangle {
                         size: Theme.scale(14)
                     }
                     onClicked: {
-                        searchField.text = ""
-                        pathBar.searchQueryChanged("")
+                        pathBar.clearSearchQuery()
                     }
                 }
 

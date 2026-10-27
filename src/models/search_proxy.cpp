@@ -26,6 +26,14 @@ QString SearchProxy::showingNote() const {
     return QStringLiteral("%1 results").arg(n);
 }
 
+QString SearchProxy::identityAt(int proxyRow) const {
+    auto* folder = qobject_cast<qg::FolderModel*>(sourceModel());
+    if (!folder || proxyRow < 0 || proxyRow >= rowCount())
+        return {};
+    const QModelIndex src = mapToSource(index(proxyRow, 0));
+    return src.isValid() ? folder->identityAt(src.row()) : QString();
+}
+
 QVariant SearchProxy::data(const QModelIndex& proxyIndex, int role) const {
     if (!proxyIndex.isValid() || !sourceModel())
         return {};

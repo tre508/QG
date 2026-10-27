@@ -87,6 +87,14 @@ QHash<int, QByteArray> FolderModel::roleNames() const
 void FolderModel::applySnapshot(const FolderSnapshot &snapshot)
 {
     beginResetModel();
+    if (m_folderPath != snapshot.path) {
+        m_folderPath = snapshot.path;
+        // Emitted inside the reset so views never observe rows from one folder
+        // labelled with another folder's path. This is the fact that lets the
+        // playback layer tell navigation from the playing file disappearing
+        // (AUD-007 / FIX-NAV-01).
+        emit folderPathChanged();
+    }
     m_entries = snapshot.entries;
     m_thumbnails.clear();
     m_thumbnailStates.clear();
@@ -157,10 +165,19 @@ void FolderModel::applyDiff(const FolderDiff &diff)
 
 void FolderModel::clear()
 {
-    if (m_entries.isEmpty()) {
+    if (m_entries.isEmpty() && m_folderPath.isEmpty()) {
         return;
     }
     beginResetModel();
+    // A cleared model represents no directory: keeping the previous path would
+    // let a consumer read "the playing file's folder, now empty", which the
+    // playback layer correctly treats as the file having been removed
+    // (AUD-007 / FIX-NAV-01). Emitted inside the reset, like applySnapshot, so
+    // no observer sees rows from one folder under another folder's path.
+    if (!m_folderPath.isEmpty()) {
+        m_folderPath.clear();
+        emit folderPathChanged();
+    }
     m_entries.clear();
     m_thumbnails.clear();
     m_thumbnailStates.clear();

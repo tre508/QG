@@ -52,6 +52,13 @@ QHash<int, QByteArray> RecursiveSearchModel::roleNames() const
     };
 }
 
+QString RecursiveSearchModel::identityAt(int row) const
+{
+    if (row < 0 || row >= m_results.size())
+        return {};
+    return m_results.at(row).identity;
+}
+
 void RecursiveSearchModel::setResults(const QVector<RecursiveSearchResult>& results,
                                       const QString& query)
 {

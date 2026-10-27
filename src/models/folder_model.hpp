@@ -25,6 +25,11 @@ class FolderModel : public QAbstractListModel {
     Q_PROPERTY(int count READ count NOTIFY countChanged)
     Q_PROPERTY(int videoCount READ videoCount NOTIFY countChanged)
     Q_PROPERTY(int folderCount READ folderCount NOTIFY countChanged)
+    // The directory these rows belong to. Consumers need it to distinguish
+    // "this folder changed" from "a different folder is now loaded" — without
+    // it, navigation looks identical to the playing file disappearing
+    // (AUD-007 / FIX-NAV-01).
+    Q_PROPERTY(QString folderPath READ folderPath NOTIFY folderPathChanged)
 
 public:
     enum Roles {
@@ -86,10 +91,17 @@ public:
 
     bool removeByIdentity(const QString &identity);
 
-    int indexOfIdentity(const QString &identity) const;
+    // Reverse lookup for identity-keyed callers (bulk verbs, the status strip's
+    // aggregate size). Q_INVOKABLE because QML resolves a selected identity to a
+    // row through it (AUD-004: without it the byte total silently stayed 0).
+    Q_INVOKABLE int indexOfIdentity(const QString &identity) const;
     const Entry *entryAt(int row) const;
     QList<Entry> entries() const;
     int count() const { return static_cast<int>(m_entries.size()); }
+    // Directory the current rows were enumerated from (empty before the first
+    // snapshot). Not canonicalised — it is `QDir::cleanPath()`ed by the browser
+    // before enumeration, and the playback layer compares it as-is.
+    QString folderPath() const { return m_folderPath; }
     int videoCount() const noexcept { return m_videoCount; }
     int folderCount() const noexcept { return m_folderCount; }
 
@@ -122,11 +134,13 @@ public:
 
 signals:
     void countChanged();
+    void folderPathChanged();
 
 private:
     void recount();
     void adjustCounts(const Entry &entry, int delta);
 
+    QString m_folderPath;
     QList<Entry> m_entries;
     QHash<QString, QVariant> m_thumbnails;
     QHash<QString, ThumbnailState> m_thumbnailStates;

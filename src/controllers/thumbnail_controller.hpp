@@ -68,6 +68,26 @@ signals:
     void thumbnailFailed(const QString &identity);
 
 private:
+    // Outcome of the GUI-thread consultation of QG's own persisted cache
+    // (§18.2 "Serve" precedes "Extract", §18.5 policy).
+    enum class CacheDecision {
+        Extract,  // nothing usable is persisted: dispatch the decode
+        Serve,    // a valid cached PNG exists: read it on the media pool
+        Terminal, // retry budget exhausted: report the failure without decoding
+    };
+
+    // GUI thread only. Runs the database half of the Serve → Extract decision:
+    // `Database` is a single thread-affine connection (persistence/database.hpp)
+    // and `runExtraction` executes on the media pool — `MediaProbeService`
+    // resolves its cache on the GUI thread for the same reason. On `Serve`,
+    // `cachePath` receives the persisted PNG so the media pool can read it; on
+    // `Terminal`, `terminalResult()` supplies the failure value.
+    CacheDecision consultQgCache(const ThumbnailRequest &request, QString *cachePath) const;
+
+    // Failure value for a terminal marker: no image, so `applyResult` takes the
+    // existing failure path (amber placeholder + `thumbnailFailed`, §18.5).
+    ThumbnailExtraction terminalResult(const ThumbnailRequest &request) const;
+
     ThumbnailExtraction runExtraction(const ThumbnailRequest &request) const;
     bool validate(const ThumbnailRequest &request, quint64 generation) const;
     void applyResult(const ThumbnailRequest &request,
@@ -86,6 +106,8 @@ private:
     quint64 m_generation = 0;
     bool m_immediate = false;
     bool m_processing = false;
+    // True while pumpAsync is resolving cache-served requests synchronously.
+    bool m_resolving = false;
 };
 
 } // namespace qg

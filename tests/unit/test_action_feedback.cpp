@@ -9,6 +9,13 @@
 //   * the collision/properties helpers read real filesystem data;
 //   * Trash reports failure without claiming success, and a successful Trash +
 //     Undo round-trips (isolated by redirecting XDG_DATA_HOME).
+//
+// AUD-003: the mutating entry points now run on the I/O pool
+// (FileOperationsService is an asynchronous facade), so a result — and the
+// filesystem effect that produced it — arrives after the event loop turns. Cases
+// below wait for either the reported outcome (QTRY_COMPARE on the spy) or the
+// effect (QTRY_VERIFY on the filesystem) instead of assuming inline completion.
+// The async contract itself is pinned by `qg_file_ops_async`.
 
 #include "controllers/actions_controller.hpp"
 #include "filesystem/operations.hpp"
@@ -74,7 +81,7 @@ void ActionFeedbackTest::renameSuccessReportsServiceOutcome()
 
     actions.rename(source, "renamed");
 
-    QCOMPARE(finished.count(), 1);
+    QTRY_COMPARE(finished.count(), 1);
     QCOMPARE(finished.at(0).at(0).toString(), QStringLiteral("rename"));
     QCOMPARE(finished.at(0).at(1).toBool(), true);
     QCOMPARE(toasts.count(), 0); // success is silent
@@ -99,7 +106,7 @@ void ActionFeedbackTest::renameCollisionReportsFailureAndToasts()
 
     actions.rename(source, "taken");
 
-    QCOMPARE(finished.count(), 1);
+    QTRY_COMPARE(finished.count(), 1);
     QCOMPARE(finished.at(0).at(1).toBool(), false); // no phantom success
     QCOMPARE(toasts.count(), 1);
     const QString message = toasts.at(0).at(0).toString();
@@ -264,6 +271,8 @@ void ActionFeedbackTest::clipboardCutPasteMovesFile()
     actions.paste(targetDir);
     QCOMPARE(actions.clipboardPaths().size(), 0); // cleared after paste
     QCOMPARE(actions.clipboardIsCut(), false);
+    QTRY_COMPARE(finishedSpy.count(), 1); // typed as move (cut + paste)
+    QCOMPARE(finishedSpy.at(0).at(0).toString(), QStringLiteral("move"));
     QVERIFY(QFileInfo::exists(targetDir + QDir::separator() + "original.mp4"));
     QVERIFY(!QFileInfo::exists(source));
 }
@@ -286,7 +295,7 @@ void ActionFeedbackTest::clipboardCopyPasteCreatesDupe()
 
     actions.paste(targetDir);
     QVERIFY(QFileInfo::exists(source)); // source retained
-    QVERIFY(QFileInfo::exists(targetDir + QDir::separator() + "original.mp4")); // dupe
+    QTRY_VERIFY(QFileInfo::exists(targetDir + QDir::separator() + "original.mp4")); // dupe
 }
 
 void ActionFeedbackTest::clipboardMoveVsCopyResolvesCorrectly()
@@ -317,7 +326,7 @@ void ActionFeedbackTest::permanentDeleteRemovesFile()
 
     actions.deletePermanently({source});
 
-    QCOMPARE(finished.count(), 1);
+    QTRY_COMPARE(finished.count(), 1);
     QCOMPARE(finished.at(0).at(0).toString(), QStringLiteral("delete"));
     QCOMPARE(finished.at(0).at(1).toBool(), true);
     QCOMPARE(toasts.count(), 0); // success is not a failure toast
@@ -341,7 +350,7 @@ void ActionFeedbackTest::permanentDeleteMissingPathFails()
 
     actions.deletePermanently({ghost});
 
-    QCOMPARE(finished.count(), 1);
+    QTRY_COMPARE(finished.count(), 1);
     QCOMPARE(finished.at(0).at(1).toBool(), false); // missing is a failure, not success
     QCOMPARE(toasts.count(), 1);                     // exactly one toast
     QVERIFY(QFileInfo::exists(survivor));            // nothing else touched
@@ -365,7 +374,7 @@ void ActionFeedbackTest::permanentDeleteMultiSelectPartialSummary()
     {
         QSignalSpy finished(&actions, &ActionsController::actionFinished);
         actions.deletePermanently({a, b});
-        QCOMPARE(finished.count(), 1);
+        QTRY_COMPARE(finished.count(), 1);
         QCOMPARE(finished.at(0).at(1).toBool(), true);
         QVERIFY(!QFileInfo::exists(a));
         QVERIFY(!QFileInfo::exists(b));
@@ -377,7 +386,7 @@ void ActionFeedbackTest::permanentDeleteMultiSelectPartialSummary()
     {
         QSignalSpy finished(&actions, &ActionsController::actionFinished);
         actions.deletePermanently({c, ghost});
-        QCOMPARE(finished.count(), 1);
+        QTRY_COMPARE(finished.count(), 1);
         QCOMPARE(finished.at(0).at(1).toBool(), false); // partial → overall failure
         QVERIFY(!QFileInfo::exists(c));                 // present one removed
     }

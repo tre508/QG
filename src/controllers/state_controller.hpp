@@ -8,6 +8,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QSet>
 
 namespace qg {
 
@@ -21,10 +22,14 @@ public:
     explicit StateController(QObject *parent = nullptr);
 
     void setDatabase(Database *database) { m_database = database; }
-    void setModel(FolderModel *model) { m_model = model; }
+    void setModel(FolderModel *model);
 
     // Apply persisted favorite/watched/progress to the model's current rows.
     void loadIntoModel();
+    // Coalesced incremental variant: applies persisted state to rows that have
+    // not been decorated yet. Wired to the canonical model's structural signals
+    // so every navigation/refresh shows hearts, checks and progress (§21.3).
+    void scheduleLoad();
 
 public slots:
     void setFavorite(const QString &identity, bool value);
@@ -49,6 +54,12 @@ private:
 
     Database *m_database = nullptr;
     FolderModel *m_model = nullptr;
+
+    // Identities already decorated in the current model generation. Cleared on
+    // modelReset so a freshly replaced row set is re-decorated (§21.3).
+    QSet<QString> m_applied;
+    // scheduleLoad() coalescing: true while a zero-delay pass is pending.
+    bool m_loadScheduled = false;
 };
 
 } // namespace qg

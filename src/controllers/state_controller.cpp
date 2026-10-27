@@ -1,5 +1,7 @@
 #include "controllers/state_controller.hpp"
 
+#include <QTimer>
+
 #include "models/folder_model.hpp"
 #include "persistence/database.hpp"
 #include "persistence/repositories.hpp"
@@ -11,6 +13,44 @@ namespace qg {
 StateController::StateController(QObject *parent)
     : QObject(parent)
 {
+}
+
+void StateController::setModel(FolderModel *model)
+{
+    if (m_model == model) {
+        return;
+    }
+    if (m_model != nullptr) {
+        m_model->disconnect(this);
+    }
+    m_model = model;
+    m_applied.clear();
+    if (m_model == nullptr) {
+        return;
+    }
+    // A new folder replaces the rows wholesale (applySnapshot → modelReset);
+    // forget what was decorated and re-apply for the new set.
+    connect(m_model, &QAbstractItemModel::modelReset, this, [this]() {
+        m_applied.clear();
+        scheduleLoad();
+    });
+    connect(m_model, &QAbstractItemModel::rowsInserted, this,
+            [this](const QModelIndex &, int, int) { scheduleLoad(); });
+    scheduleLoad();
+}
+
+void StateController::scheduleLoad()
+{
+    if (m_model == nullptr || m_database == nullptr || m_loadScheduled) {
+        return;
+    }
+    m_loadScheduled = true;
+    // Zero-delay coalescing: a 200-entry enumeration batch, a sort and a refresh
+    // all collapse into one pass on the next event-loop turn.
+    QTimer::singleShot(0, this, [this]() {
+        m_loadScheduled = false;
+        loadIntoModel();
+    });
 }
 
 void StateController::setFavorite(const QString &identity, bool value)
@@ -83,9 +123,10 @@ void StateController::loadIntoModel()
     MediaStateRepository repository(*m_database);
     const QList<Entry> entries = m_model->entries();
     for (const Entry &entry : entries) {
-        if (entry.identity.isEmpty()) {
+        if (entry.identity.isEmpty() || m_applied.contains(entry.identity)) {
             continue;
         }
+        m_applied.insert(entry.identity);
         m_model->updateFavorite(entry.identity, repository.favorite(entry.identity));
 
         const bool watched = repository.watched(entry.identity);
