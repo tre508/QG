@@ -271,6 +271,15 @@ void PlaybackManager::openWithIdentity(const QString &path, const QString &ident
         pendingPath_ = path;
         pendingStart_ = startPosition;
         loadPending_ = true;
+        // The handle exists now, but a QQuickFramebufferObject only re-runs its
+        // renderer when the item is dirty — and nothing else dirties it after a
+        // load is requested. Without this the surface would never repaint,
+        // renderContext() would never be reached with a live handle,
+        // renderContextReady would never fire and this pending load would never
+        // be issued. This only schedules a repaint: the mpv render context is
+        // still created on the render thread with the GL context current.
+        if (surface_)
+            surface_->update();
         return;
     }
 

@@ -31,8 +31,12 @@ public:
     // The creating OpenGL context must be current.
     void scheduleRenderContextFree(mpv_render_context* ctx);
 
-    int framesRendered() const { return framesRendered_.load(); }
-    void noteFrameRendered() { framesRendered_.fetch_add(1); }
+    int framesRendered() const { return framesRendered_->load(); }
+    // Shared with the renderer so the render thread increments a counter it
+    // owns a reference to instead of dereferencing this item cross-thread
+    // (QPointer is not safe to read from the scene-graph thread).
+    std::shared_ptr<std::atomic<int>> framesRenderedShared() const { return framesRendered_; }
+    void noteFrameRendered() { framesRendered_->fetch_add(1); }
 
 signals:
     void backendChanged();
@@ -56,5 +60,6 @@ private:
     std::shared_ptr<MpvUpdateTarget> updateTarget_;
     std::shared_ptr<std::atomic<bool>> renderContextFreePending_;
     bool videoActive_ = false;
-    std::atomic<int> framesRendered_{0};
+    std::shared_ptr<std::atomic<int>> framesRendered_ =
+        std::make_shared<std::atomic<int>>(0);
 };

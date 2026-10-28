@@ -28,6 +28,7 @@ public:
         backend_ = surface->backend();
         updateTarget_ = surface->updateTarget();
         freePending_ = surface->renderContextFreePending();
+        frames_ = surface->framesRenderedShared();
     }
 
     void render() override
@@ -44,6 +45,11 @@ public:
             return;
 
         if (ctx_ == nullptr) {
+            // NOTE: do not release the GL context here. mpv's render context
+            // must be created with `current` still current on this thread,
+            // otherwise mpv_render_context_create() fails with
+            // MPV_ERROR_UNSUPPORTED (-18) because the proc-address callback
+            // sees no current context.
             ctx_ = backend_->renderContext();
             if (ctx_ != nullptr) {
                 backend_->setRenderGlContext(current);
@@ -60,6 +66,7 @@ public:
         if (fbo == nullptr || fbo->width() <= 0 || fbo->height() <= 0)
             return;
 
+        fbo->bind();
         GLint fboId = 0;
         current->functions()->glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fboId);
         mpv_opengl_fbo mpvFbo{};
@@ -72,9 +79,13 @@ public:
             {MPV_RENDER_PARAM_FLIP_Y, &flipY},
             {MPV_RENDER_PARAM_INVALID, nullptr},
         };
-        mpv_render_context_render(ctx_, params);
+        int renderResult = mpv_render_context_render(ctx_, params);
+        if (renderResult < 0) {
+            qWarning() << "VideoSurfaceItem: mpv_render_context_render failed (error" << renderResult << ")";
+        }
         mpv_render_context_report_swap(ctx_);
-        surface_->noteFrameRendered();
+        if (frames_)
+            frames_->fetch_add(1);
     }
 
 private:
@@ -93,6 +104,7 @@ private:
     QPointer<MpvBackend> backend_;
     std::shared_ptr<MpvUpdateTarget> updateTarget_;
     std::shared_ptr<std::atomic<bool>> freePending_;
+    std::shared_ptr<std::atomic<int>> frames_;
     mpv_render_context* ctx_ = nullptr;
 };
 
