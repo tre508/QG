@@ -20,6 +20,10 @@ class PlaybackSession : public QObject {
     Q_PROPERTY(double volume READ volume WRITE setVolume NOTIFY volumeChanged)
     Q_PROPERTY(bool muted READ muted WRITE setMuted NOTIFY mutedChanged)
     Q_PROPERTY(bool seekable READ seekable WRITE setSeekable NOTIFY seekableChanged)
+    // End of the buffered range in seconds (0 = nothing buffered / unsupported).
+    // The timeline draws it behind the progress indicator (§3.1 "buffered range,
+    // when supported"); mpv feeds it from `demuxer-cache-time`.
+    Q_PROPERTY(double bufferedEnd READ bufferedEnd WRITE setBufferedEnd NOTIFY bufferedEndChanged)
     Q_PROPERTY(QString errorMessage READ errorMessage WRITE setErrorMessage NOTIFY errorMessageChanged)
 public:
     enum State { Idle, Loading, Playing, Paused, Ended, Error };
@@ -51,6 +55,9 @@ public:
     bool seekable() const;
     void setSeekable(bool s);
 
+    double bufferedEnd() const;
+    void setBufferedEnd(double seconds);
+
     // Human-readable failure text (empty when there is no error). Surfaced by
     // the Stage playback-failure state (DESIGN.md §8.1, §12).
     QString errorMessage() const;
@@ -65,6 +72,7 @@ signals:
     void volumeChanged();
     void mutedChanged();
     void seekableChanged();
+    void bufferedEndChanged();
     void errorMessageChanged();
 
 private:
@@ -76,5 +84,6 @@ private:
     double volume_ = 1.0;
     bool muted_ = false;
     bool seekable_ = false;
+    double bufferedEnd_ = 0;
     QString errorMessage_;
 };

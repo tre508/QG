@@ -69,6 +69,9 @@ void MpvBackend::createHandle()
         {"idle-active", MPV_FORMAT_FLAG},
         {"volume", MPV_FORMAT_DOUBLE},
         {"mute", MPV_FORMAT_FLAG},
+        // Buffered end for the timeline's "buffered range, when supported"
+        // (§3.1). mpv returns -1 when the demuxer has no cache.
+        {"demuxer-cache-time", MPV_FORMAT_DOUBLE},
     };
     for (const ObserveSpec& spec : kObserved)
         mpv_observe_property(handle_, 0, spec.name, spec.format);

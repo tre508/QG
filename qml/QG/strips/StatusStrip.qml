@@ -22,6 +22,9 @@ Rectangle {
     property int busyCount: 0
     property var tasks: [] // [{ label, count }]
     property string transientText: ""
+    // Playback position while a session is live ("Playing 3 / 4", §3.2.6). Empty
+    // outside playback, so the strip is unchanged in Browse.
+    property string playbackText: ""
 
     // High-DPI scaled dimensions
     readonly property int scaledStripHeight: Theme.scale(28)
@@ -69,6 +72,16 @@ Rectangle {
             objectName: "statusTransient"
             visible: strip.transientText.length > 0
             text: strip.transientText
+            color: Theme.textMid
+            font.pixelSize: Theme.fontMeta
+        }
+
+        // Playback position (§3.2.6): the Reel and the Stage show it too, but the
+        // status strip is the always-visible browser-region indicator.
+        Text {
+            objectName: "statusPlayback"
+            visible: strip.playbackText.length > 0
+            text: strip.playbackText
             color: Theme.textMid
             font.pixelSize: Theme.fontMeta
         }

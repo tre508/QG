@@ -1,5 +1,7 @@
 #include "playback_session.hpp"
 
+#include <cmath>
+
 PlaybackSession::PlaybackSession(QObject* parent) : QObject(parent) {}
 
 QString PlaybackSession::identity() const { return identity_; }
@@ -40,6 +42,14 @@ void PlaybackSession::setMuted(bool m) {
 bool PlaybackSession::seekable() const { return seekable_; }
 void PlaybackSession::setSeekable(bool s) {
     if (seekable_ != s) { seekable_ = s; emit seekableChanged(); }
+}
+
+double PlaybackSession::bufferedEnd() const { return bufferedEnd_; }
+void PlaybackSession::setBufferedEnd(double seconds) {
+    // mpv reports -1/NaN when the demuxer has no cache: publish "nothing
+    // buffered" instead of a bogus range (§3.1: unknown is shown as unknown).
+    const double sane = (seconds > 0.0 && std::isfinite(seconds)) ? seconds : 0.0;
+    if (bufferedEnd_ != sane) { bufferedEnd_ = sane; emit bufferedEndChanged(); }
 }
 
 QString PlaybackSession::errorMessage() const { return errorMessage_; }

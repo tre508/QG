@@ -24,6 +24,7 @@ TestCase {
         property real volume: 0.5
         property bool muted: false
         property bool seekable: true
+        property real bufferedEnd: 0
         property string errorMessage: ""
         property string identity: "inode:1:3"
     }
@@ -224,7 +225,7 @@ TestCase {
         compare(findByName(rootOf(shell), "stageRegion").visible, false)
     }
 
-    // --- Cursor auto-hide and any-input wake (§25.7) -------------------------
+    // --- Pointer auto-hide and any-input wake (§4.4, §25.7) ------------------
 
     function test_cursorOverlayExistsAndRespectsCinemaAndTextEditing() {
         const b = build()
@@ -235,13 +236,8 @@ TestCase {
         b.pc.enterCinema()
         wait(50)
         compare(overlay.visible, true, "overlay visible in Cinema")
-
-        // With no text editing and timer not running -> cursor should be Arrow
-        // (timer hasn't triggered yet, so running is false initially). Actually
-        // the timer starts running immediately, so cursorShape should evaluate.
-        // Let's test the binding directly by simulating timer state.
-        const timerObj = findByName(rootOf(b.shell), "cursorIdleTimer")
-        verify(timerObj !== null, "cursor idle timer exists")
+        // Both overlays are shown on entry (§4.4), so the pointer is visible too.
+        compare(overlay.cursorShape, Qt.ArrowCursor, "pointer shown with the overlays")
     }
 
     function test_cursorNotHiddenWhileTextEditing() {
@@ -264,19 +260,118 @@ TestCase {
         editor.destroy()
     }
 
-    function test_anyInputWakeRestoresControlsAndCursor() {
+    // §4.4: the overlays fade after ~2 s of pointer inactivity, the pointer hides
+    // *when they disappear*, and any interaction restores both. The pointer is
+    // therefore asserted against the overlay state, not against a second timer.
+    function test_overlaysFadeAndTakeThePointerWithThem() {
         const b = build()
         b.pc.enterCinema()
         wait(50)
         const stage = findByName(rootOf(b.shell), "stageRegion")
         const overlay = findByName(rootOf(b.shell), "cinemaOverlay")
-        verify(stage !== null && overlay !== null)
+        const transport = findByName(rootOf(b.shell), "stageTransport")
+        verify(stage !== null && overlay !== null && transport !== null)
 
-        // Verify the timer can be restarted (simulating input wake).
-        const timerObj = findByName(rootOf(b.shell), "cursorIdleTimer")
-        verify(timerObj !== null)
-        timerObj.restart()
-        compare(timerObj.running, true, "timer running after restart (simulated input)")
+        // Both overlays are shown on entry, pointer included (§4.4).
+        compare(transport.shown, true, "overlays shown on entry")
+        compare(overlay.cursorShape, Qt.ArrowCursor)
+
+        // The Cinema idle interval is the "approximately two seconds" of §4.4
+        // (the inline Stage keeps §23.5's 2.5 s).
+        const timer = findByName(rootOf(b.shell), "transportAutoHideTimer")
+        verify(timer !== null, "overlay idle timer exists")
+        compare(timer.interval, 2000, "Cinema fades the overlays after ~2 s")
+
+        // Idle expires: the overlays fade and the pointer goes with them.
+        transport.shown = false
+        wait(50)
+        compare(overlay.cursorShape, Qt.BlankCursor, "pointer hides with the overlays")
+
+        // Any input restores both (§4.4).
+        stage.wakeControls()
+        wait(50)
+        compare(transport.shown, true, "input restores the overlays")
+        compare(overlay.cursorShape, Qt.ArrowCursor, "input restores the pointer")
+    }
+
+    function test_scrollingRestoresTheOverlays() {
+        const b = build()
+        b.pc.enterCinema()
+        wait(50)
+        const overlay = findByName(rootOf(b.shell), "cinemaOverlay")
+        const transport = findByName(rootOf(b.shell), "stageTransport")
+        verify(overlay !== null && transport !== null)
+        // §4.4 lists scrolling among the interactions that restore the overlays.
+        verify(findByName(rootOf(b.shell), "cinemaWheel") !== null,
+               "the Cinema overlay handles scroll")
+
+        // Idle: both overlays and the pointer are gone.
+        transport.shown = false
+        wait(50)
+        compare(overlay.cursorShape, Qt.BlankCursor)
+
+        // A wheel over the video restores them, exactly as pointer movement does.
+        mouseWheel(overlay, overlay.width / 2, overlay.height / 2, 0, -120)
+        wait(50)
+        compare(transport.shown, true, "scrolling restores the overlays")
+        compare(overlay.cursorShape, Qt.ArrowCursor, "scrolling restores the pointer")
+    }
+
+    // --- §4.3: overlay contents and interaction targets ----------------------
+
+    function test_topOverlayNamesTheContainingFolder() {
+        const b = build()
+        b.pc.enterCinema()
+        wait(50)
+        const title = findByName(rootOf(b.shell), "cinemaTitle")
+        verify(title !== null, "top overlay has its information line")
+
+        // The session plays /tmp/clips/clip_03.mp4: the overlay names the file and
+        // the *containing folder*, never the file's own path (DESIGN.md §4.3).
+        verify(title.text.indexOf("/tmp/clips") !== -1, "containing folder is shown")
+        compare(title.text.indexOf("/tmp/clips/clip_03.mp4"), -1,
+                "the media file path is not repeated")
+        verify(title.text.indexOf("clip_03.mp4") === 0, "filename leads the line")
+    }
+
+    function test_cinemaControlsAreLargerThanInlineStageControls() {
+        const b = build()
+        const transport = findByName(rootOf(b.shell), "stageTransport")
+        const play = findByName(rootOf(b.shell), "transportPlayPause")
+        const close = findByName(rootOf(b.shell), "transportClose")
+        verify(transport !== null && play !== null && close !== null)
+
+        const inlineHeight = transport.height
+        const inlineTarget = play.implicitWidth
+        verify(close.visible, "the inline Stage keeps its Close control")
+
+        b.pc.enterCinema()
+        wait(50)
+        verify(transport.height > inlineHeight, "Cinema's bar is taller (§4.3)")
+        verify(play.implicitWidth > inlineTarget, "Cinema's targets are larger (§4.3)")
+        // §4.3/§4.5: Close lives in the top overlay only while in Cinema.
+        compare(close.visible, false, "the bottom overlay drops Close in Cinema")
+    }
+
+    // §4.5: leaving Cinema restores the Reel's *prior* visibility, so a media
+    // change made inside Cinema must not reopen it.
+    function test_reelVisibilitySurvivesACinemaMediaChange() {
+        const b = build()
+        // Control: playback started outside Cinema opens the Reel (§10.2).
+        b.pc.playbackStarted("/tmp/clips/clip_01.mp4")
+        wait(50)
+        compare(b.shell.reelVisible, true, "a new playback opens the Reel")
+
+        b.shell.reelVisible = false
+        b.pc.enterCinema()
+        wait(50)
+        b.pc.playbackStarted("/tmp/clips/clip_04.mp4")
+        wait(50)
+        compare(b.shell.reelVisible, false, "a Cinema media change leaves the Reel alone")
+
+        b.pc.exitCinema()
+        wait(50)
+        compare(b.shell.reelVisible, false, "§4.5: the prior visibility is restored")
     }
 
     function test_fourTogglePointsConsistent() {

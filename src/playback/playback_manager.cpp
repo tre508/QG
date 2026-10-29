@@ -152,6 +152,13 @@ void PlaybackManager::onMpvPropertyChanged(const QString &name, const QVariant &
     {
         s->setMuted(value.toBool());
     }
+    else if (name == QLatin1String("demuxer-cache-time"))
+    {
+        // Buffered end for the timeline (§3.1). mpv publishes -1 while the
+        // demuxer has nothing cached; setBufferedEnd normalises that to 0.
+        if (value.isValid())
+            s->setBufferedEnd(value.toDouble());
+    }
 }
 
 void PlaybackManager::onMpvFileLoaded()
@@ -204,6 +211,9 @@ void PlaybackManager::updateSessionFromMpv()
     int mute = 0;
     if (mpv_get_property(h, "mute", MPV_FORMAT_FLAG, &mute) >= 0)
         session_->setMuted(mute != 0);
+    double cached = 0;
+    if (mpv_get_property(h, "demuxer-cache-time", MPV_FORMAT_DOUBLE, &cached) >= 0)
+        session_->setBufferedEnd(cached);
 }
 
 void PlaybackManager::attachSurface(VideoSurfaceItem *surface)
@@ -260,6 +270,7 @@ void PlaybackManager::openWithIdentity(const QString &path, const QString &ident
     session_->setPath(path);
     session_->setPosition(0);
     session_->setDuration(0);
+    session_->setBufferedEnd(0); // the new media has nothing buffered yet (§3.1)
     session_->setErrorMessage(QString());
     session_->setState(PlaybackSession::Loading);
     emit playbackStarted(path);
@@ -510,12 +521,16 @@ void PlaybackManager::seekAbsolute(double position)
 void PlaybackManager::setVolume(double volume)
 {
     // `volume` is the canonical 0..1 fraction (DESIGN.md §8.3); mpv's property
-    // is 0..100.
-    double clamped = qBound(0.0, volume, 1.0);
+    // is 0..100 — so the write has to be scaled, exactly as the read path scales
+    // it down (`onMpvPropertyChanged` divides by 100). Writing the raw fraction
+    // made the slider and the ↑/↓ nudge effectively silent (0.5 → 0.5 %).
+    const double clamped = qBound(0.0, volume, 1.0);
     session_->setVolume(clamped);
     if (!backend_ || !backend_->handle())
         return;
-    mpv_set_property(backend_->handle(), "volume", MPV_FORMAT_DOUBLE, &clamped);
+    // mpv reads the value through a void*, so the buffer must be non-const.
+    double mpvVolume = clamped * 100.0;
+    mpv_set_property(backend_->handle(), "volume", MPV_FORMAT_DOUBLE, &mpvVolume);
 }
 
 void PlaybackManager::setMuted(bool muted)

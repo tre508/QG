@@ -207,6 +207,41 @@ ApplicationWindow {
             window.playbackController.toggleCinema()
     }
 
+    // The folder the live session plays from — its media file's directory.
+    // DESIGN.md §4.3: the Cinema top overlay names the *containing folder*, not the
+    // media file (the fullscreen wireframe reads
+    // "sunset_over_sea.mp4 · ~/Videos/2024/Summer trip · 7 / 42").
+    readonly property string playbackFolderPath: {
+        const p = window.activeSession ? window.activeSession.path : ""
+        if (p.length === 0)
+            return ""
+        const cut = p.lastIndexOf("/")
+        return cut > 0 ? p.substring(0, cut) : (cut === 0 ? "/" : "")
+    }
+
+    // The wireframe writes that folder as "~/Videos/2024/Summer trip", so a path
+    // inside the home directory is abbreviated. BrowserController owns the home
+    // path; with no controller the absolute path is shown unchanged.
+    function abbreviatePath(path) {
+        if (path.length === 0)
+            return ""
+        const c = window.browserController
+        if (!c || c.homePath === undefined)
+            return path
+        const home = c.homePath()
+        if (home.length > 1 && path.indexOf(home) === 0
+                && (path.length === home.length || path.charAt(home.length) === "/"))
+            return "~" + path.substring(home.length)
+        return path
+    }
+
+    // Any Cinema interaction — pointer movement, click, scroll or key press
+    // (DESIGN.md §4.4) — restores both overlays and, with them, the pointer.
+    function wakeCinemaControls() {
+        if (window.cinema && stage && stage.wakeControls)
+            stage.wakeControls()
+    }
+
     // Esc: in Cinema → return to Stage; in Stage → un-bloom to the grid.
     function escapePlayback() {
         if (!window.playbackController)
@@ -800,7 +835,7 @@ ContentView {
                     session: window.activeSession
                     playing: window.playbackController
                              && window.playbackController.playing === true
-                    currentPath: window.activeSession ? window.activeSession.path : ""
+                    currentFolderPath: window.abbreviatePath(window.playbackFolderPath)
                     currentName: (window.activeSession && window.activeSession.path)
                                  ? window.activeSession.path.split("/").pop() : ""
                     errorText: window.activeSession ? window.activeSession.errorMessage : ""
@@ -932,6 +967,12 @@ ContentView {
                                     ? window.browserController.freeSpaceBytes : -1)
                                  : -1
                 busyCount: (window.browserController && window.browserController.busy) ? 1 : 0
+                // Playback position (§3.2.6): follows the session's ordered
+                // context, so Prev/Next move it without a Stage collapse.
+                playbackText: (window.sessionActive && window.playbackController
+                               && window.playbackController.positionLabel.length > 0)
+                              ? qsTr("Playing %1").arg(window.playbackController.positionLabel)
+                              : ""
             }
         }
     }
@@ -1006,8 +1047,12 @@ ContentView {
                 contentView.forceActiveFocus()
             }
         }
-        // The Reel opens with playback and closes when playback ends (§10.2).
-        function onPlaybackStarted(path) { window.reelVisible = true }
+        // The Reel opens with playback and closes when playback ends (§10.2). A
+        // media change made *inside* Cinema must not touch its visibility, though:
+        // Cinema hides the Reel, so §4.5's "restore the Reel's prior visibility"
+        // would otherwise be broken by pressing Next — the Reel would reappear on
+        // exit even though the user had closed it before entering.
+        function onPlaybackStarted(path) { if (!window.cinema) window.reelVisible = true }
         function onPlaybackEnded() { window.reelVisible = false }
         // Prev/Next stopped at a folder boundary (§23.8): surface it.
         function onEndOfFolder() { toastHost.show(qsTr("End of folder"), "", "") }
@@ -1111,7 +1156,11 @@ ContentView {
     // Fullscreen (F11 / F) and stop/exit (Esc) — objectNames preserved for tests.
     Shortcut { objectName: "cinemaToggleShortcut"; sequence: "F11"; enabled: window.sessionActive && !window.textEditing; onActivated: window.keyboard ? window.keyboard.dispatch("playback.fullscreen") : window.toggleCinema() }
     Shortcut { objectName: "stageFSShortcut"; sequence: "F"; enabled: window.sessionActive && !window.textEditing && (window.cinema || stage.activeFocus); onActivated: window.keyboard ? window.keyboard.dispatch("playback.fullscreen") : window.toggleCinema() }
-    Shortcut { objectName: "cinemaEscShortcut"; sequence: "Esc"; enabled: window.sessionActive && !window.textEditing; onActivated: window.keyboard ? window.keyboard.dispatch("playback.stop") : window.escapePlayback() }
+    // Esc is "one step back", never a reload (playback §2.3): Cinema → Stage
+    // (the same session keeps playing), Stage → Browse (explicit stop). Routing
+    // it to "playback.stop" unconditionally made leaving Cinema kill playback,
+    // which escapePlayback() already models.
+    Shortcut { objectName: "cinemaEscShortcut"; sequence: "Esc"; enabled: window.sessionActive && !window.textEditing; onActivated: window.escapePlayback() }
 
     // Intent handlers for the router's shell-owned surfaces (REMEDIATION-012).
     Connections {
@@ -1425,7 +1474,12 @@ ContentView {
         }
     }
 
-    // --- Cinema cursor auto-hide + any-input wake (DESIGN.md §9.2, §25.7) -----
+    // --- Cinema pointer auto-hide + any-input wake (DESIGN.md §4.4, §25.7) -----
+    // The pointer is driven by the overlays' own visibility (stage.controlsVisible)
+    // rather than by a second, independent timer: §4.4 requires the pointer to hide
+    // "when the overlays disappear", and two timers meant the pointer vanished 500 ms
+    // before the controls and stayed hidden after a key press (which only woke the
+    // controls). One state, one behaviour.
     MouseArea {
         id: cinemaOverlay
         objectName: "cinemaOverlay"
@@ -1435,31 +1489,17 @@ ContentView {
         z: 100
         visible: window.cinema
 
-        // Cursor hides after 2s idle in Cinema (unless textEditing); any mouse
-        // movement or click restores it and wakes controls.
-        cursorShape: (window.cinema && !window.textEditing && !cursorIdleTimer.running)
+        cursorShape: (window.cinema && !window.textEditing && !stage.controlsVisible)
                      ? Qt.BlankCursor : Qt.ArrowCursor
 
-        onPositionChanged: {
-            cursorIdleTimer.restart()
-            if (window.cinema && stage && stage.wakeControls)
-                stage.wakeControls()
-        }
-        onClicked: {
-            cursorIdleTimer.restart()
-            if (window.cinema && stage && stage.wakeControls)
-                stage.wakeControls()
-        }
-    }
+        onPositionChanged: window.wakeCinemaControls()
+        onClicked: window.wakeCinemaControls()
 
-    Timer {
-        id: cursorIdleTimer
-        objectName: "cursorIdleTimer"
-        interval: 2000
-        repeat: false
-        running: window.cinema && !window.textEditing
-        onTriggered: {
-            // Cursor hides via cinemaOverlay.cursorShape binding.
+        // §4.4: scrolling is interaction too. Cinema has nothing to scroll, so the
+        // handler only restores the overlays and the pointer.
+        WheelHandler {
+            objectName: "cinemaWheel"
+            onWheel: window.wakeCinemaControls()
         }
     }
 }

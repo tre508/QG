@@ -28,7 +28,11 @@ Rectangle {
     property var session: null
 
     property bool playing: false
-    property string currentPath: ""
+    // Display-ready *containing folder* of the live session (DESIGN.md §4.3): the
+    // Cinema top overlay names the folder, not the media file — the fullscreen
+    // wireframe reads "sunset_over_sea.mp4 · ~/Videos/2024/Summer trip · 7 / 42".
+    // Injected by Main.qml, which owns the session and the browser controller.
+    property string currentFolderPath: ""
     property string currentName: ""
     property int currentNumber: 0
     property int totalCount: 0
@@ -39,6 +43,12 @@ Rectangle {
     property bool cinema: false
 
     readonly property bool videoActive: surfaceItem.videoActive
+
+    // Overlay visibility (§4.4). The top info bar and the bottom transport fade as
+    // ONE unit, and this is that unit's state: Main.qml binds the pointer to it, so
+    // the cursor is hidden exactly while the overlays are, instead of by a second
+    // timer that could drift out of step with them.
+    readonly property bool controlsVisible: transport.shown
 
     signal closeRequested()
     signal fullscreenRequested()
@@ -51,6 +61,11 @@ Rectangle {
     function wakeControls() {
         transport.wake()
     }
+
+    // Leaving Cinema must restore the bar: it auto-hides there (§9.2), so its
+    // opacity may already be 0 when the inline Stage (which keeps its controls
+    // permanently visible, §2.1.6) comes back.
+    onCinemaChanged: if (!cinema) transport.wake()
 
     width: parent ? parent.width : 800
     // Inline: 16:9 capped at ~60% of the available content height (DESIGN.md
@@ -65,18 +80,13 @@ Rectangle {
     color: Theme.ink
     clip: true
 
-    // Bloom/collapse (DESIGN.md §2.8, §8.1): cross-fade + geometry tween.
-    // Reduced-motion → instant swap (no animation).
+    // Appearance (playback §2.1.4): the video must appear as soon as the surface
+    // is ready — no thumbnail→video cross-fade, fade-in or scale-in. The
+    // bloom/collapse *states* are kept (they decide whether the Stage is shown at
+    // all) but the property changes are applied instantly: the Behaviors that
+    // tweened opacity/scale were the transition this requirement forbids.
     opacity: 0
-    Behavior on opacity {
-        enabled: Theme.motionEnabled
-        NumberAnimation { duration: Theme.motionBloom; easing.type: Easing.OutCubic }
-    }
     scale: 0.92
-    Behavior on scale {
-        enabled: Theme.motionEnabled
-        NumberAnimation { duration: Theme.motionBloom; easing.type: Easing.OutCubic }
-    }
 
     states: [
         State {
@@ -115,23 +125,27 @@ Rectangle {
         }
     }
 
-    // Cinema top info bar (DESIGN.md §9.2, §9.4): filename · path · n / N with a
-    // ✕ that exits Cinema and stops playback. Fades with the bottom transport.
+    // Cinema top information overlay (DESIGN.md §4.3, fullscreen wireframe):
+    // filename · containing folder · n / N, plus the explicit ✕ that closes
+    // playback. It fades with the bottom transport and becomes inert with it, so
+    // the ✕ can never be clicked while it is invisible.
     Rectangle {
         id: cinemaBar
         objectName: "cinemaBar"
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 40
+        // §4.3: larger targets than the inline Stage's.
+        height: 56
         visible: stage.cinema
+        enabled: transport.shown
         color: Qt.rgba(5/255, 7/255, 13/255, 0.6)
         opacity: stage.cinema ? transport.opacity : 0
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: Theme.space3
-            anchors.rightMargin: Theme.space1
+            anchors.leftMargin: Theme.space4
+            anchors.rightMargin: Theme.space2
             spacing: Theme.space2
 
             Text {
@@ -139,17 +153,19 @@ Rectangle {
                 Layout.fillWidth: true
                 elide: Text.ElideMiddle
                 text: stage.currentName
-                      + (stage.currentPath.length > 0 ? "   \u00B7   " + stage.currentPath : "")
+                      + (stage.currentFolderPath.length > 0 ? "   \u00B7   " + stage.currentFolderPath : "")
                       + (stage.totalCount > 0
                          ? "   \u00B7   " + stage.currentNumber + " / " + stage.totalCount : "")
                 color: Theme.textHi
-                font.pixelSize: Theme.fontMeta
+                font.pixelSize: Theme.fontBody
             }
 
             ToolButton {
                 objectName: "cinemaClose"
+                implicitWidth: 40
+                implicitHeight: 40
                 contentItem: Item {
-                    Icon { anchors.centerIn: parent; name: "close"; size: 16; color: Theme.textMid }
+                    Icon { anchors.centerIn: parent; name: "close"; size: 20; color: Theme.textMid }
                 }
                 onClicked: stage.closeRequested()
                 Accessible.name: "Exit fullscreen and stop"
@@ -158,11 +174,17 @@ Rectangle {
     }
 
     // Video area: 16:9 max, letterboxed in --ink (DESIGN.md §9.1).
+    // It is centred in the space *above* the transport, and its height budget
+    // excludes the transport — otherwise a video that fills the 60 % cap gets its
+    // bottom ~24 px covered by the controls (playback §2.1.6: controls below the
+    // video, never on top of it).
     Item {
         id: stageVideoArea
-        anchors.centerIn: parent
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.verticalCenterOffset: -transport.height / 2
         readonly property real availWidth: Math.max(0, stage.width - Theme.space4)
-        readonly property real availHeight: Math.max(0, stage.height - Theme.space8)
+        readonly property real availHeight: Math.max(0, stage.height - transport.height - Theme.space1 * 2)
         width: Math.min(availWidth, availHeight * 16 / 9)
         height: width * 9 / 16
 
@@ -247,12 +269,19 @@ Rectangle {
         anchors.left: parent.left
         anchors.right: parent.right
 
+        // Auto-hide is the Cinema overlay behaviour (§4.4/§9.2/§25.7). The inline
+        // Stage always shows its controls (§2.1.6), so auto-hide is enabled only
+        // here — and Cinema also sizes the controls up (§4.3).
+        cinema: stage.cinema
+        autoHideEnabled: stage.cinema
+
         playing: stage.session ? stage.session.state === 2 : false
         position: stage.session ? stage.session.position : 0
         duration: stage.session ? stage.session.duration : 0
         volume: stage.session ? stage.session.volume : 1.0
         muted: stage.session ? stage.session.muted : false
         seekable: stage.session ? stage.session.seekable : false
+        bufferedEnd: stage.session ? stage.session.bufferedEnd : 0
 
         onPlayPauseRequested: if (stage.playbackManager) stage.playbackManager.togglePlayPause()
         onSeekBackRequested: if (stage.playbackManager) stage.playbackManager.seek(-10)

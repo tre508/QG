@@ -122,13 +122,43 @@ TestCase {
         fuzzyCompare(timeline.value, 0, 0.001)
     }
 
+    // The inline Stage keeps its controls permanently visible (DESIGN.md §2.1.6):
+    // waking the bar must not arm the idle timer where auto-hide is off. Arming it
+    // anyway made the inline Stage lose its controls 2.5 s after every return from
+    // Cinema, because the timer's `running` binding was broken by an imperative
+    // restart().
+    function test_wakeOnlyArmsTheIdleTimerWhereAutoHideApplies() {
+        const bar = makeBar({ autoHideEnabled: false })
+        const timer = child(bar, "transportAutoHideTimer")
+
+        bar.wake()
+        compare(timer.running, false, "auto-hide off -> no countdown")
+        compare(bar.shown, true, "the inline Stage keeps its controls")
+
+        // Cinema turns auto-hide on: the countdown is armed and the overlays hide.
+        bar.autoHideEnabled = true
+        bar.wake()
+        compare(timer.running, true, "auto-hide on -> countdown armed")
+        compare(timer.interval, 2500, "the inline Stage keeps §23.5's 2.5 s")
+
+        // Leaving Cinema stops the countdown and restores the controls.
+        bar.autoHideEnabled = false
+        compare(timer.running, false, "leaving Cinema disarms the countdown")
+        bar.wake()
+        compare(bar.shown, true, "returning to the Stage restores the controls")
+    }
+
     function test_reflectsPlaybackState() {
         const bar = makeBar({ playing: false, duration: 125, position: 72, volume: 0.4 })
         const play = child(bar, "transportPlayPause")
-        compare(play.contentItem.children[0].name, "play", "play icon when paused")
+        // Find the icon by objectName: locating it positionally coupled the
+        // assertion to the focus-ring Rectangle the button declares first, so
+        // it silently went stale when that ring was added.
+        const playIcon = child(play.contentItem, "transportPlayPauseIcon")
+        compare(playIcon.name, "play", "play icon when paused")
 
         bar.playing = true
-        compare(play.contentItem.children[0].name, "pause", "pause icon when playing")
+        compare(playIcon.name, "pause", "pause icon when playing")
 
         const vol = child(bar, "transportVolume")
         fuzzyCompare(vol.value, 0.4, 0.001)
